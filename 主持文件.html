@@ -1,0 +1,4067 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>辩论赛计时器 · Pro</title>
+<style>
+  :root {
+    --bg: #0B0D12;
+    --bg-2: #14171F;
+    --ink: #F5F2EA;
+    --muted: #8A8E99;
+    --line: rgba(255,255,255,0.08);
+
+    /* dynamic — JS overwrites these every tick */
+    --pro: #D94D4D;
+    --pro-soft: rgba(217,77,77,0.55);
+    --pro-deep: #5A1818;
+    --con: #4A8BD4;
+    --con-soft: rgba(74,139,212,0.55);
+    --con-deep: #14304F;
+
+    --heat-pro: 0;   /* 0 = calm, 1 = critical */
+    --heat-con: 0;
+    --tilt: 0;       /* -1..1 — dual balance: + = pro占优, − = con占优 */
+    --pulse-speed: 1.6s;
+
+    --warn: #FFB454;
+    --good: #6FCB7A;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: ui-serif, "Source Han Serif SC", "Songti SC", Georgia, serif;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  .sans { font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; }
+
+  /* ===== Atmospheric background layers ===== */
+  .atmos {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .atmos .glow {
+    position: absolute;
+    inset: -20%;
+    opacity: 0;
+    transition: opacity 1.6s cubic-bezier(.4,0,.2,1);
+    will-change: opacity, transform;
+  }
+  /* firelight — glow rises from the bottom of the speaking side */
+  .atmos .glow.pro {
+    background:
+      radial-gradient(ellipse 75% 55% at 15% 100%, var(--pro-soft), transparent 65%),
+      radial-gradient(ellipse 45% 32% at 5% 100%, color-mix(in srgb, var(--pro) 65%, transparent), transparent 75%);
+  }
+  .atmos .glow.con {
+    background:
+      radial-gradient(ellipse 75% 55% at 85% 100%, var(--con-soft), transparent 65%),
+      radial-gradient(ellipse 45% 32% at 95% 100%, color-mix(in srgb, var(--con) 65%, transparent), transparent 75%);
+  }
+  body.pro-turn .atmos .glow.pro { opacity: 1; }
+  body.con-turn .atmos .glow.con { opacity: 1; }
+  /* flame flicker while the clock runs — faster as heat rises */
+  body.running.pro-turn .atmos .glow.pro {
+    animation: fire-flicker calc(2.8s - 1.7s * var(--heat-pro)) ease-in-out infinite;
+  }
+  body.running.con-turn .atmos .glow.con {
+    animation: fire-flicker calc(2.8s - 1.7s * var(--heat-con)) ease-in-out infinite;
+  }
+  @keyframes fire-flicker {
+    0%, 100% { opacity: .78; }
+    17% { opacity: 1; }
+    33% { opacity: .82; }
+    51% { opacity: .96; }
+    70% { opacity: .75; }
+    86% { opacity: 1; }
+  }
+
+  /* Smoke — soft plumes rising above the flames (was: mid-screen aurora) */
+  .atmos .aurora {
+    position: absolute;
+    inset: -20%;
+    opacity: 0;
+    mix-blend-mode: screen;
+    filter: blur(60px);
+    transition: opacity 1.4s ease;
+    will-change: transform, opacity;
+  }
+  .atmos .aurora.pro {
+    background:
+      radial-gradient(ellipse 26% 34% at 12% 96%, color-mix(in srgb, var(--pro) 45%, transparent), transparent 70%),
+      radial-gradient(ellipse 20% 28% at 30% 100%, color-mix(in srgb, var(--pro) 30%, transparent), transparent 70%),
+      radial-gradient(ellipse 34% 24% at 5% 78%, color-mix(in srgb, var(--pro) 22%, transparent), transparent 70%);
+    animation: smoke-pro 16s ease-in-out infinite;
+  }
+  .atmos .aurora.con {
+    background:
+      radial-gradient(ellipse 26% 34% at 88% 96%, color-mix(in srgb, var(--con) 45%, transparent), transparent 70%),
+      radial-gradient(ellipse 20% 28% at 70% 100%, color-mix(in srgb, var(--con) 30%, transparent), transparent 70%),
+      radial-gradient(ellipse 34% 24% at 95% 78%, color-mix(in srgb, var(--con) 22%, transparent), transparent 70%);
+    animation: smoke-con 16s ease-in-out infinite;
+  }
+  body.pro-turn .atmos .aurora.pro { opacity: 0.6; }
+  body.con-turn .atmos .aurora.con { opacity: 0.6; }
+  /* smoke churns faster as heat rises */
+  body.pro-turn .atmos .aurora.pro { animation-duration: calc(16s - 10s * var(--heat-pro)); }
+  body.con-turn .atmos .aurora.con { animation-duration: calc(16s - 10s * var(--heat-con)); }
+  @keyframes smoke-pro {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    30% { transform: translate(2%, -5%) scale(1.06); }
+    60% { transform: translate(-1.5%, -8%) scale(1.1); }
+    80% { transform: translate(1%, -4%) scale(1.04); }
+  }
+  @keyframes smoke-con {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    30% { transform: translate(-2%, -5%) scale(1.06); }
+    60% { transform: translate(1.5%, -8%) scale(1.1); }
+    80% { transform: translate(-1%, -4%) scale(1.04); }
+  }
+
+  /* Pulse — heartbeat in sync with timer, speed driven by --pulse-speed */
+  .atmos .pulse {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    transition: opacity .8s ease;
+    will-change: opacity;
+  }
+  .atmos .pulse.pro {
+    background: radial-gradient(ellipse 70% 90% at 0% 50%, color-mix(in srgb, var(--pro) 35%, transparent), transparent 55%);
+  }
+  .atmos .pulse.con {
+    background: radial-gradient(ellipse 70% 90% at 100% 50%, color-mix(in srgb, var(--con) 35%, transparent), transparent 55%);
+  }
+  body.running.pro-turn .atmos .pulse.pro { animation: heartbeat var(--pulse-speed) ease-in-out infinite; }
+  body.running.con-turn .atmos .pulse.con { animation: heartbeat var(--pulse-speed) ease-in-out infinite; }
+
+  @keyframes heartbeat {
+    0%, 100% { opacity: 0.25; }
+    50% { opacity: 0.9; }
+  }
+
+  /* Sweep light */
+  .atmos .sweep {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    transition: opacity 1s ease;
+    will-change: transform;
+  }
+  body.running.pro-turn .atmos .sweep.pro { opacity: 1; animation: sweep-pro 7s linear infinite; }
+  body.running.con-turn .atmos .sweep.con { opacity: 1; animation: sweep-con 7s linear infinite; }
+  .atmos .sweep.pro { background: linear-gradient(95deg, transparent 30%, color-mix(in srgb, var(--pro) 12%, transparent) 50%, transparent 70%); }
+  .atmos .sweep.con { background: linear-gradient(265deg, transparent 30%, color-mix(in srgb, var(--con) 12%, transparent) 50%, transparent 70%); }
+  @keyframes sweep-pro { 0% { transform: translateX(-30%); } 100% { transform: translateX(30%); } }
+  @keyframes sweep-con { 0% { transform: translateX(30%); } 100% { transform: translateX(-30%); } }
+
+  /* Ember canvas */
+  #embers {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+  }
+
+  /* Radar — overtime drama */
+  .radar {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 2;
+    opacity: 0;
+    transition: opacity .4s ease;
+  }
+  body.overtime .radar { opacity: 1; }
+  .radar::before, .radar::after {
+    content: '';
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    border: 2px solid color-mix(in srgb, var(--pro) 70%, transparent);
+    transform: translate(-50%, -50%);
+    animation: radar-ring 2.4s ease-out infinite;
+  }
+  .radar::after { animation-delay: 1.2s; }
+  body.con-turn .radar::before, body.con-turn .radar::after { border-color: color-mix(in srgb, var(--con) 70%, transparent); }
+  @keyframes radar-ring {
+    0% { width: 40px; height: 40px; opacity: 0.9; border-width: 3px; }
+    100% { width: 220vmax; height: 220vmax; opacity: 0; border-width: 0.5px; }
+  }
+
+  /* ===== Protect period — yellow question-mark impact ===== */
+  .shield {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 2;
+    opacity: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  body.protect-active .shield { animation: shield-fade 5s linear forwards; }
+  @keyframes shield-fade {
+    0%, 80% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+
+  /* hero ? — slams in from above with blur/rotation, then drifts to a watermark */
+  .qmark-main {
+    font-family: ui-serif, "Source Han Serif SC", Georgia, serif;
+    font-size: 320px;
+    font-weight: 900;
+    line-height: 1;
+    color: #FFB454;
+    text-shadow:
+      0 0 30px rgba(255,180,84,0.9),
+      0 0 80px rgba(255,180,84,0.55),
+      0 0 160px rgba(255,180,84,0.28);
+    opacity: 0;
+    transform: scale(3) rotate(-12deg);
+    filter: blur(20px);
+    will-change: transform, opacity, filter;
+  }
+  body.protect-active .qmark-main {
+    animation:
+      qmark-slam 0.55s cubic-bezier(.2,1.4,.3,1) forwards,
+      qmark-linger 4.4s cubic-bezier(.5,0,.5,1) 0.55s forwards;
+  }
+  @keyframes qmark-slam {
+    0%   { opacity: 0; transform: scale(3) rotate(-12deg); filter: blur(20px); }
+    55%  { opacity: 1; transform: scale(0.92) rotate(3deg); filter: blur(0); }
+    75%  { transform: scale(1.06) rotate(-1.5deg); }
+    100% { opacity: 1; transform: scale(1) rotate(0); filter: blur(0); }
+  }
+  @keyframes qmark-linger {
+    0%   { opacity: 1; transform: scale(1) rotate(0); }
+    100% { opacity: 0.08; transform: scale(0.55) rotate(-8deg) translate(-30vw, -28vh); }
+  }
+
+  /* splash ?s — fly outward in 5 directions on impact */
+  .qmark-burst {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: none;
+  }
+  .qmark-burst span {
+    position: absolute;
+    font-family: ui-serif, "Source Han Serif SC", Georgia, serif;
+    font-size: 88px;
+    font-weight: 800;
+    color: #FFB454;
+    text-shadow: 0 0 14px rgba(255,180,84,0.8), 0 0 32px rgba(255,180,84,0.4);
+    opacity: 0;
+    will-change: transform, opacity;
+  }
+  body.protect-active .qmark-burst span {
+    animation: qmark-fly 0.9s cubic-bezier(.2,.8,.3,1) 0.18s forwards;
+  }
+  .qmark-burst span:nth-child(1) { --tx: -260px; --ty: -150px; --rot: -22deg; }
+  .qmark-burst span:nth-child(2) { --tx:  260px; --ty: -170px; --rot:  20deg; }
+  .qmark-burst span:nth-child(3) { --tx: -340px; --ty:   70px; --rot: -28deg; }
+  .qmark-burst span:nth-child(4) { --tx:  310px; --ty:  110px; --rot:  24deg; }
+  .qmark-burst span:nth-child(5) { --tx:    0;   --ty: -260px; --rot:   6deg; }
+  @keyframes qmark-fly {
+    0%   { opacity: 0; transform: translate(0,0) scale(0.3) rotate(0); }
+    20%  { opacity: 1; }
+    100% { opacity: 0; transform: translate(var(--tx), var(--ty)) scale(1.25) rotate(var(--rot)); }
+  }
+
+  /* warm vignette flash on impact */
+  .qmark-veil {
+    position: absolute; inset: 0;
+    background: radial-gradient(circle at center,
+      rgba(255,180,84,0.25) 0%,
+      rgba(255,180,84,0.08) 30%,
+      transparent 65%);
+    mix-blend-mode: screen;
+    opacity: 0;
+  }
+  body.protect-active .qmark-veil { animation: qmark-veil 1.2s ease-out forwards; }
+  @keyframes qmark-veil {
+    0%   { opacity: 0; transform: scale(0.6); }
+    25%  { opacity: 1; transform: scale(1.05); }
+    100% { opacity: 0; transform: scale(1.2); }
+  }
+
+  /* Vignette + grain */
+  .atmos::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.6) 100%);
+  }
+  .atmos::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    opacity: 0.04;
+    mix-blend-mode: overlay;
+    background-image: repeating-linear-gradient(0deg, rgba(255,255,255,.3) 0 1px, transparent 1px 2px);
+  }
+
+  .stage {
+    position: relative;
+    z-index: 3;
+    height: 100vh;
+    display: grid;
+    grid-template-rows: auto auto 1fr auto;
+  }
+
+  /* ===== Top banner ===== */
+  .topbar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    height: 64px;
+    position: relative;
+  }
+  .topbar .bar {
+    display: flex;
+    align-items: center;
+    padding: 0 32px;
+    position: relative;
+    transition: filter .8s ease, transform .8s ease;
+    overflow: hidden;
+  }
+  .topbar .bar.pro {
+    background: linear-gradient(90deg, var(--pro) 0%, color-mix(in srgb, var(--pro) 60%, transparent) 100%);
+    justify-content: flex-start;
+  }
+  .topbar .bar.con {
+    background: linear-gradient(270deg, var(--con) 0%, color-mix(in srgb, var(--con) 60%, transparent) 100%);
+    justify-content: flex-end;
+  }
+  .topbar .bar.dim { filter: saturate(0.35) brightness(0.55); }
+  /* moving highlight stripe — faster on the active side */
+  .topbar .bar::after {
+    content: '';
+    position: absolute; inset: 0;
+    background: linear-gradient(100deg, transparent 30%, rgba(255,255,255,0.18) 50%, transparent 70%);
+    transform: translateX(-100%);
+    animation: bar-breath 8s ease-in-out infinite;
+    pointer-events: none;
+  }
+  .topbar .bar.con::after {
+    background: linear-gradient(260deg, transparent 30%, rgba(255,255,255,0.18) 50%, transparent 70%);
+    animation-delay: 4s;
+  }
+  body.pro-turn .topbar .bar.pro::after,
+  body.con-turn .topbar .bar.con::after {
+    animation-duration: 3.2s;
+    background: linear-gradient(100deg, transparent 30%, rgba(255,255,255,0.32) 50%, transparent 70%);
+  }
+  body.con-turn .topbar .bar.con::after {
+    background: linear-gradient(260deg, transparent 30%, rgba(255,255,255,0.32) 50%, transparent 70%);
+  }
+  @keyframes bar-breath {
+    0%, 100% { transform: translateX(-100%); opacity: 0; }
+    50% { transform: translateX(100%); opacity: 1; }
+  }
+
+  /* overtime: flash */
+  body.overtime .topbar .bar:not(.dim) { animation: bar-flash 0.5s steps(2) infinite; }
+  @keyframes bar-flash { 0%, 49% { filter: brightness(1.4); } 50%, 100% { filter: brightness(0.6); } }
+
+  .seal {
+    display: inline-flex;
+    align-items: center; justify-content: center;
+    width: 44px; height: 44px;
+    border: 2px solid rgba(255,255,255,0.85);
+    color: #fff;
+    font-family: ui-serif, "Source Han Serif SC", serif;
+    font-size: 22px; font-weight: 700;
+    letter-spacing: 0.05em;
+    border-radius: 4px;
+    position: relative;
+    transition: transform .4s cubic-bezier(.4,0,.2,1), box-shadow .4s;
+  }
+  body.pro-turn .bar.pro .seal,
+  body.con-turn .bar.con .seal {
+    animation: seal-breathe 2.4s ease-in-out infinite;
+    box-shadow:
+      0 0 14px rgba(255,255,255,0.6),
+      inset 0 0 12px rgba(255,255,255,0.25);
+  }
+  @keyframes seal-breathe {
+    0%, 100% { transform: scale(1); box-shadow: 0 0 10px rgba(255,255,255,0.5), inset 0 0 8px rgba(255,255,255,0.2); }
+    50% { transform: scale(1.08); box-shadow: 0 0 22px rgba(255,255,255,0.9), inset 0 0 16px rgba(255,255,255,0.35); }
+  }
+
+  .team-name {
+    color: rgba(255,255,255,0.95);
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 14px;
+    letter-spacing: 0.1em;
+    margin: 0 14px;
+  }
+  .team-name .label {
+    font-size: 11px;
+    opacity: 0.75;
+    letter-spacing: 0.18em;
+    display: block;
+    margin-bottom: 2px;
+  }
+  .bar.pro .team-name { text-align: left; }
+  .bar.con .team-name { text-align: right; }
+
+  /* ===== Title strip ===== */
+  .titlestrip {
+    text-align: center;
+    padding: 22px 24px 0;
+  }
+  .titlestrip .title {
+    font-size: 22px; font-weight: 500;
+    letter-spacing: 0.08em;
+    color: var(--ink);
+  }
+  .titlestrip .topic {
+    margin-top: 6px;
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 13px;
+    color: var(--muted);
+    letter-spacing: 0.06em;
+  }
+
+  /* ===== Main ===== */
+  .main {
+    position: relative;
+    min-height: 0;
+  }
+
+  .sidebar {
+    position: absolute;
+    top: 0; left: 0; bottom: 0;
+    width: 260px;
+    border-right: 1px solid var(--line);
+    background: rgba(11,13,18,0.72);
+    backdrop-filter: blur(14px);
+    overflow-y: auto;
+    padding: 20px 0;
+    z-index: 3;
+    transform: translateX(-100%);
+    transition: transform .4s cubic-bezier(.4,0,.2,1);
+  }
+  .sidebar.open { transform: translateX(0); }
+
+  .sidebar-toggle {
+    position: absolute;
+    top: 16px; left: 16px;
+    z-index: 4;
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+    transition: background .15s;
+  }
+  .sidebar-toggle:hover { background: rgba(255,255,255,0.12); }
+  .sidebar h3 {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.2em;
+    color: var(--muted);
+    text-transform: uppercase;
+    padding: 16px 24px 8px;
+  }
+  .sidebar h3:first-child { padding-top: 0; }
+  .stage-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 24px;
+    cursor: pointer;
+    font-size: 13px;
+    color: rgba(245,242,234,0.75);
+    border-left: 2px solid transparent;
+    transition: background .2s, color .2s, border-color .4s;
+  }
+  .stage-item:hover { background: rgba(255,255,255,0.04); color: var(--ink); }
+  .stage-item.active {
+    background: rgba(255,255,255,0.06);
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .stage-item.active.pro-side { border-left-color: var(--pro); }
+  .stage-item.active.con-side { border-left-color: var(--con); }
+  .stage-item.active.neutral-side { border-left-color: var(--ink); }
+  .stage-item .num {
+    font-family: -apple-system, sans-serif;
+    color: var(--muted);
+    font-size: 11px;
+    min-width: 22px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stage-item .name { flex: 1; }
+  .stage-item .dur {
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .stage-item.done { opacity: 0.4; }
+  .stage-item.done .name { text-decoration: line-through; }
+
+  /* ===== Center stage ===== */
+  .center {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 40px 60px;
+    overflow: hidden;
+    text-align: center;
+  }
+  .center > * { width: 100%; max-width: 1100px; }
+  .center > .stage-meta { max-width: none; }
+  .center .stage-name,
+  .center .stage-meta,
+  .center .status-row { display: flex; justify-content: center; }
+  .center .stage-name { display: block; }
+  .center .stage-meta { display: block; }
+
+  .stage-name {
+    font-size: 64px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-align: center;
+    line-height: 1.1;
+    white-space: nowrap;
+  }
+  .stage-name .ch {
+    display: inline-block;
+    opacity: 0;
+    transform: translateY(20px) rotateX(-40deg);
+    animation: char-in .55s cubic-bezier(.2,.7,.3,1) forwards;
+  }
+  @keyframes char-in {
+    to { opacity: 1; transform: translateY(0) rotateX(0); }
+  }
+  .stage-name.leaving .ch {
+    animation: char-out .35s cubic-bezier(.5,0,.7,.3) forwards;
+  }
+  @keyframes char-out {
+    to { opacity: 0; transform: translateY(-18px) rotateX(40deg); }
+  }
+
+  .stage-meta {
+    margin-top: 18px;
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 14px;
+    color: var(--muted);
+    max-width: none;
+    text-align: center;
+    line-height: 1.7;
+    white-space: nowrap;
+    transition: opacity .5s;
+  }
+
+  .timers {
+    margin-top: 42px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 56px;
+    position: relative;
+  }
+  /* Center divider (dual mode) */
+  .center-divider {
+    position: absolute;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%) translateX(calc(var(--tilt) * 60px));
+    z-index: 2;
+    display: none;
+    align-items: center; justify-content: center;
+    pointer-events: none;
+    transition: transform .8s cubic-bezier(.4,0,.2,1);
+  }
+  .timers.dual .center-divider { display: flex; }
+  .center-divider .line {
+    position: absolute;
+    width: 2px; height: 160px;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--pro) 50%, var(--con) 50%), transparent);
+    box-shadow: 0 0 18px color-mix(in srgb, var(--pro) 30%, var(--con) 30%);
+  }
+  .center-divider .vs {
+    position: relative;
+    font-family: ui-serif, serif;
+    font-size: 38px;
+    font-weight: 700;
+    color: rgba(245,242,234,0.55);
+    letter-spacing: 0.1em;
+    z-index: 2;
+    text-shadow: 0 0 20px rgba(0,0,0,0.6);
+    animation: vs-spin 12s linear infinite;
+  }
+  @keyframes vs-spin {
+    0% { transform: rotate(0); filter: hue-rotate(0); }
+    100% { transform: rotate(360deg); filter: hue-rotate(360deg); }
+  }
+
+  .timer-block {
+    text-align: center;
+    padding: 28px 44px;
+    transition: opacity .6s, transform .6s cubic-bezier(.4,0,.2,1);
+    min-width: 320px;
+    background: transparent;
+    border: none;
+    position: relative;
+  }
+  .timer-block .label {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.2em;
+    color: var(--muted);
+    margin-bottom: 12px;
+    transition: color .4s;
+  }
+  .timer-block .time {
+    font-family: "SF Mono", ui-monospace, "Menlo", monospace;
+    font-size: 92px;
+    font-weight: 200;
+    line-height: 1;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    white-space: nowrap;
+    transition: color .35s, font-weight .8s, letter-spacing .8s, text-shadow .4s;
+    will-change: transform;
+  }
+  .timer-block.solo .time { font-size: 160px; font-weight: 100; }
+
+  /* tick bounce */
+  .timer-block .time.tick {
+    animation: time-tick .35s cubic-bezier(.3,1.5,.4,1);
+  }
+  @keyframes time-tick {
+    0% { transform: scale(1); }
+    35% { transform: scale(1.035); }
+    100% { transform: scale(1); }
+  }
+
+  /* heat-driven weight & glow on the ACTIVE timer */
+  .timer-block.pro.active .time {
+    font-weight: calc(200 + 500 * var(--heat-pro));
+    letter-spacing: calc(-0.03em - 0.015em * var(--heat-pro));
+    color: var(--pro);
+    text-shadow:
+      0 0 calc(12px + 20px * var(--heat-pro)) color-mix(in srgb, var(--pro) 80%, transparent),
+      0 0 calc(40px + 40px * var(--heat-pro)) color-mix(in srgb, var(--pro) 50%, transparent);
+  }
+  .timer-block.con.active .time {
+    font-weight: calc(200 + 500 * var(--heat-con));
+    letter-spacing: calc(-0.03em - 0.015em * var(--heat-con));
+    color: var(--con);
+    text-shadow:
+      0 0 calc(12px + 20px * var(--heat-con)) color-mix(in srgb, var(--con) 80%, transparent),
+      0 0 calc(40px + 40px * var(--heat-con)) color-mix(in srgb, var(--con) 50%, transparent);
+  }
+  .timer-block.pro.active .label { color: var(--pro); }
+  .timer-block.con.active .label { color: var(--con); }
+  .timer-block.inactive { opacity: 0.32; transform: scale(0.96); }
+  .timer-block.protect .time { color: var(--good); text-shadow: 0 0 18px color-mix(in srgb, var(--good) 60%, transparent); }
+
+  /* Overtime jitter on the active timer */
+  body.overtime .timer-block.active .time {
+    animation: time-jitter 0.12s steps(2) infinite;
+    color: var(--pro) !important;
+  }
+  body.overtime .timer-block.con.active .time { color: var(--con) !important; }
+  @keyframes time-jitter {
+    0% { transform: translate(0, 0); }
+    25% { transform: translate(-1px, 1px); }
+    50% { transform: translate(1px, -1px); }
+    75% { transform: translate(-1px, -1px); }
+    100% { transform: translate(1px, 1px); }
+  }
+
+  /* Power bar — dual mode */
+  .power-bar {
+    margin-top: 24px;
+    width: 100%;
+    max-width: 720px;
+    height: 9px;
+    border-radius: 5px;
+    overflow: visible;
+    background: rgba(255,255,255,0.06);
+    position: relative;
+    display: none;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
+  }
+  .power-bar::before {
+    /* inner track depth */
+    content: '';
+    position: absolute; inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(180deg, rgba(0,0,0,0.4), rgba(0,0,0,0.1));
+    pointer-events: none;
+    z-index: 0;
+  }
+  .timers.dual + .power-bar-wrap .power-bar { display: block; }
+  .power-bar-wrap {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    margin-top: 24px;
+    width: 100%;
+  }
+  body.dual-stage .power-bar-wrap { display: flex; }
+  .power-bar .fill-pro {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    border-radius: 5px 0 0 5px;
+    background:
+      linear-gradient(90deg, var(--pro), color-mix(in srgb, var(--pro) 70%, white));
+    width: calc(50% + var(--tilt) * 50%);
+    transition: width .8s cubic-bezier(.4,0,.2,1);
+    box-shadow: 0 0 12px var(--pro-soft), inset 0 1px 0 rgba(255,255,255,0.25);
+    z-index: 1;
+  }
+  .power-bar .fill-con {
+    position: absolute;
+    right: 0; top: 0; bottom: 0;
+    border-radius: 0 5px 5px 0;
+    background:
+      linear-gradient(270deg, var(--con), color-mix(in srgb, var(--con) 70%, white));
+    width: calc(50% - var(--tilt) * 50%);
+    transition: width .8s cubic-bezier(.4,0,.2,1);
+    box-shadow: 0 0 12px var(--con-soft), inset 0 1px 0 rgba(255,255,255,0.25);
+    z-index: 1;
+  }
+  /* burning edge — white-hot flame at the contested boundary */
+  .power-bar .fill-pro::after {
+    content: '';
+    position: absolute;
+    right: -6px; top: -4px; bottom: -4px;
+    width: 14px;
+    background: linear-gradient(to right,
+      color-mix(in srgb, var(--pro) 60%, transparent),
+      #fff 55%,
+      transparent);
+    filter: blur(2.5px);
+    animation: edge-flicker 0.18s steps(3) infinite;
+    pointer-events: none;
+    border-radius: 50%;
+  }
+  .power-bar .fill-con::after {
+    content: '';
+    position: absolute;
+    left: -6px; top: -4px; bottom: -4px;
+    width: 14px;
+    background: linear-gradient(to left,
+      color-mix(in srgb, var(--con) 60%, transparent),
+      #fff 55%,
+      transparent);
+    filter: blur(2.5px);
+    animation: edge-flicker 0.18s steps(3) infinite 0.06s;
+    pointer-events: none;
+    border-radius: 50%;
+  }
+  @keyframes edge-flicker {
+    0%, 100% { opacity: 0.9; transform: scaleY(1) scaleX(1); }
+    33% { opacity: 1; transform: scaleY(1.4) scaleX(1.15); }
+    66% { opacity: 0.6; transform: scaleY(0.85) scaleX(0.92); }
+  }
+  /* critical state: a side has < 20% remaining → side fill pulses red-hot */
+  .power-bar.crit-pro .fill-pro {
+    animation: bar-crit 0.55s ease-in-out infinite;
+    box-shadow: 0 0 18px var(--pro), 0 0 32px var(--pro-soft), inset 0 1px 0 rgba(255,255,255,0.4);
+  }
+  .power-bar.crit-con .fill-con {
+    animation: bar-crit 0.55s ease-in-out infinite;
+    box-shadow: 0 0 18px var(--con), 0 0 32px var(--con-soft), inset 0 1px 0 rgba(255,255,255,0.4);
+  }
+  @keyframes bar-crit {
+    0%, 100% { filter: brightness(1) saturate(1); }
+    50% { filter: brightness(1.6) saturate(1.5); }
+  }
+  /* tearing white slash on switch-side */
+  .power-bar .tear {
+    position: absolute; top: -6px; bottom: -6px;
+    left: -10%;
+    width: 80px;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.95) 50%, transparent);
+    opacity: 0;
+    pointer-events: none;
+    filter: blur(1px);
+    mix-blend-mode: screen;
+    z-index: 3;
+    transform: skewX(-20deg);
+  }
+  .power-bar .tear.run { animation: bar-tear 0.5s cubic-bezier(.3,1,.4,1); }
+  @keyframes bar-tear {
+    0% { left: -12%; opacity: 0; }
+    25% { opacity: 1; }
+    100% { left: 108%; opacity: 0; }
+  }
+  /* VS divider halo strengthens with imbalance */
+  .center-divider::before {
+    content: '';
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 90px; height: 90px;
+    transform: translate(-50%, -50%);
+    background: radial-gradient(circle,
+      color-mix(in srgb, var(--pro) 50%, var(--con)) 0%,
+      transparent 70%);
+    filter: blur(18px);
+    opacity: 0.45;
+    pointer-events: none;
+    animation: vs-halo 4s ease-in-out infinite;
+  }
+  @keyframes vs-halo {
+    0%, 100% { opacity: 0.35; transform: translate(-50%, -50%) scale(0.95); }
+    50% { opacity: 0.7; transform: translate(-50%, -50%) scale(1.15); }
+  }
+  .power-bar-labels {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    max-width: 720px;
+    margin-top: 6px;
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    color: var(--muted);
+  }
+  .power-bar-labels .l-pro { color: var(--pro); }
+  .power-bar-labels .l-con { color: var(--con); }
+
+  /* Manual time adjust row */
+  .time-adjust {
+    margin-top: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    opacity: 0.75;
+    transition: opacity .25s;
+  }
+  .time-adjust:hover { opacity: 1; }
+  .time-adjust.hidden { display: none; }
+  .time-adjust .ta-label {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 0.25em;
+    margin-right: 6px;
+    text-transform: uppercase;
+  }
+  .time-adjust button {
+    padding: 5px 12px;
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--ink);
+    cursor: pointer;
+    transition: all .15s;
+    letter-spacing: 0.02em;
+  }
+  .time-adjust button:hover {
+    background: rgba(255,255,255,0.12);
+    border-color: rgba(255,255,255,0.25);
+    transform: translateY(-1px);
+  }
+  .time-adjust button:active { transform: translateY(0); }
+  body.pro-turn .time-adjust button:hover { border-color: var(--pro); color: var(--pro); }
+  body.con-turn .time-adjust button:hover { border-color: var(--con); color: var(--con); }
+
+  .status-row {
+    margin-top: 22px;
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 13px;
+    color: var(--muted);
+    height: 26px;
+    letter-spacing: 0.05em;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center; gap: 6px;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+  }
+  .badge.protect { background: rgba(111,203,122,0.15); color: var(--good); border: 1px solid rgba(111,203,122,0.3); }
+  .badge.warn { background: rgba(255,180,84,0.15); color: var(--warn); border: 1px solid rgba(255,180,84,0.3); }
+  .badge.over { background: color-mix(in srgb, var(--pro) 18%, transparent); color: var(--pro); border: 1px solid var(--pro); }
+  body.con-turn .badge.over { background: color-mix(in srgb, var(--con) 18%, transparent); color: var(--con); border-color: var(--con); }
+
+  /* ===== Controls ===== */
+  .controls {
+    border-top: 1px solid var(--line);
+    background: rgba(11,13,18,0.85);
+    backdrop-filter: blur(14px);
+    padding: 16px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .btn-group { display: flex; gap: 8px; align-items: center; }
+  .btn-group .label {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 11px;
+    color: var(--muted);
+    margin-right: 8px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+  button {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 13px;
+    padding: 9px 16px;
+    border: 1px solid var(--line);
+    background: rgba(255,255,255,0.04);
+    color: var(--ink);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all .15s;
+    display: inline-flex;
+    align-items: center; gap: 8px;
+  }
+  button:hover { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.2); }
+  button.primary {
+    background: var(--ink);
+    color: var(--bg);
+    border-color: var(--ink);
+  }
+  button.primary:hover { background: #fff; }
+  button kbd {
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 10px;
+    background: rgba(0,0,0,0.25);
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid rgba(255,255,255,0.1);
+  }
+  button.primary kbd { background: rgba(0,0,0,0.15); border-color: rgba(0,0,0,0.1); }
+
+  /* ===== Side-switch collision (slabs + burst + seam) ===== */
+  .collision {
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 96;
+    opacity: 0;
+    overflow: hidden;
+  }
+  .collision.run { opacity: 1; }
+
+  .collide-pro, .collide-con {
+    position: absolute;
+    top: -8%; bottom: -8%;
+    width: 56vw;
+    opacity: 0;
+    will-change: transform, opacity;
+  }
+  .collide-pro {
+    left: 0;
+    background: linear-gradient(90deg,
+      transparent 0%,
+      color-mix(in srgb, var(--pro) 25%, transparent) 50%,
+      color-mix(in srgb, var(--pro) 75%, transparent) 85%,
+      var(--pro) 100%);
+    transform: translateX(-110%) skewX(-14deg);
+    filter: blur(2px);
+  }
+  .collide-con {
+    right: 0;
+    background: linear-gradient(270deg,
+      transparent 0%,
+      color-mix(in srgb, var(--con) 25%, transparent) 50%,
+      color-mix(in srgb, var(--con) 75%, transparent) 85%,
+      var(--con) 100%);
+    transform: translateX(110%) skewX(-14deg);
+    filter: blur(2px);
+  }
+  .collision.run .collide-pro { animation: slab-pro 0.6s cubic-bezier(.4,0,.2,1); }
+  .collision.run .collide-con { animation: slab-con 0.6s cubic-bezier(.4,0,.2,1); }
+  @keyframes slab-pro {
+    0%   { transform: translateX(-110%) skewX(-14deg); opacity: 0; }
+    30%  { opacity: 0.95; }
+    45%  { transform: translateX(-8%) skewX(-14deg); opacity: 1; }
+    65%  { transform: translateX(12%) skewX(-14deg); opacity: 0.6; }
+    100% { transform: translateX(60%) skewX(-14deg); opacity: 0; }
+  }
+  @keyframes slab-con {
+    0%   { transform: translateX(110%) skewX(-14deg); opacity: 0; }
+    30%  { opacity: 0.95; }
+    45%  { transform: translateX(8%) skewX(-14deg); opacity: 1; }
+    65%  { transform: translateX(-12%) skewX(-14deg); opacity: 0.6; }
+    100% { transform: translateX(-60%) skewX(-14deg); opacity: 0; }
+  }
+
+  /* white-hot impact burst at the meeting point */
+  .collide-burst {
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 260px; height: 260px;
+    margin: -130px 0 0 -130px;
+    border-radius: 50%;
+    opacity: 0;
+    background:
+      radial-gradient(circle, #fff 0%, rgba(255,255,255,0.4) 30%, transparent 65%);
+    mix-blend-mode: screen;
+  }
+  .collision.run .collide-burst {
+    animation: collide-burst 0.55s cubic-bezier(.2,1.5,.3,1) 0.28s;
+  }
+  @keyframes collide-burst {
+    0%   { transform: scale(0.2); opacity: 0; }
+    35%  { transform: scale(1); opacity: 1; }
+    100% { transform: scale(2.6); opacity: 0; }
+  }
+
+  /* diagonal seam tear */
+  .collide-seam {
+    position: absolute;
+    left: 50%; top: -10%;
+    width: 3px;
+    height: 130vh;
+    margin-left: -1.5px;
+    background: linear-gradient(180deg, transparent 0%, #fff 50%, transparent 100%);
+    box-shadow: 0 0 18px #fff, 0 0 36px rgba(255,255,255,0.8);
+    transform: rotate(9deg) scaleY(0);
+    transform-origin: center center;
+    opacity: 0;
+    filter: blur(0.5px);
+  }
+  .collision.run .collide-seam {
+    animation: seam-rip 0.42s cubic-bezier(.3,1,.4,1) 0.22s;
+  }
+  @keyframes seam-rip {
+    0%   { transform: rotate(9deg) scaleY(0) translateX(-6px); opacity: 0; }
+    25%  { transform: rotate(9deg) scaleY(1) translateX(0);    opacity: 1; }
+    70%  { transform: rotate(9deg) scaleY(1) translateX(2px);  opacity: 0.7; }
+    100% { transform: rotate(9deg) scaleY(1) translateX(8px);  opacity: 0; }
+  }
+
+  /* stage halves shudder when slabs collide */
+  body.colliding .stage { animation: stage-shudder 0.4s cubic-bezier(.2,1.4,.3,1) 0.28s; }
+  @keyframes stage-shudder {
+    0%   { transform: translateX(0); }
+    20%  { transform: translateX(-4px); }
+    45%  { transform: translateX(3px); }
+    70%  { transform: translateX(-1.5px); }
+    100% { transform: translateX(0); }
+  }
+
+  /* ===== Side-switch flash overlay ===== */
+  .flash-overlay {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 50;
+    opacity: 0;
+    background: radial-gradient(circle at center, rgba(255,255,255,0.6), transparent 60%);
+  }
+  .flash-overlay.run { animation: flash-pop .55s ease-out; }
+  @keyframes flash-pop {
+    0% { opacity: 0; transform: scale(0.6); }
+    35% { opacity: 1; }
+    100% { opacity: 0; transform: scale(1.2); }
+  }
+
+  /* ===== Cover ===== */
+  .cover {
+    position: fixed;
+    inset: 0;
+    width: 100vw !important;
+    max-width: none !important;
+    background:
+      radial-gradient(ellipse 60% 70% at 8% 88%, rgba(217,77,77,0.32), transparent 55%),
+      radial-gradient(ellipse 60% 70% at 92% 12%, rgba(74,139,212,0.32), transparent 55%),
+      radial-gradient(ellipse 40% 30% at 50% 50%, rgba(0,0,0,0.55), transparent 70%),
+      var(--bg);
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 60px;
+    transition: opacity .8s ease;
+    overflow: hidden;
+  }
+  .cover::before, .cover::after {
+    content: '';
+    position: absolute;
+    width: 65vw; height: 65vw;
+    border-radius: 50%;
+    filter: blur(70px);
+    pointer-events: none;
+    z-index: 0;
+    animation: cover-breath 9s ease-in-out infinite;
+  }
+  .cover::before {
+    left: -18vw; bottom: -22vw;
+    background: radial-gradient(circle, rgba(217,77,77,0.5), transparent 60%);
+  }
+  .cover::after {
+    right: -18vw; top: -22vw;
+    background: radial-gradient(circle, rgba(74,139,212,0.5), transparent 60%);
+    animation-delay: -4.5s;
+  }
+  @keyframes cover-breath {
+    0%, 100% { transform: translate(0,0) scale(1); opacity: .85; }
+    50% { transform: translate(4vw, -2vw) scale(1.12); opacity: 1; }
+  }
+
+  .cover-watermark {
+    position: absolute;
+    font-family: ui-serif, "Source Han Serif SC", serif;
+    font-size: 92vh;
+    font-weight: 900;
+    color: rgba(255,255,255,0.028);
+    line-height: 1;
+    user-select: none;
+    pointer-events: none;
+    z-index: 0;
+    letter-spacing: -0.05em;
+    white-space: nowrap;
+    transform: translateY(-2vh);
+  }
+
+  .cover-frame {
+    position: absolute;
+    inset: 36px;
+    pointer-events: none;
+    z-index: 1;
+    transition: opacity .5s;
+  }
+  .cover-frame span {
+    position: absolute;
+    width: 38px; height: 38px;
+    border: 1px solid rgba(245,242,234,0.4);
+  }
+  .cover-frame .tl { top: 0; left: 0; border-right: none; border-bottom: none; }
+  .cover-frame .tr { top: 0; right: 0; border-left: none; border-bottom: none; }
+  .cover-frame .bl { bottom: 0; left: 0; border-right: none; border-top: none; }
+  .cover-frame .br { bottom: 0; right: 0; border-left: none; border-top: none; }
+
+  .cover-rule {
+    position: absolute;
+    left: 50%; transform: translateX(-50%);
+    width: 58%;
+    height: 1px;
+    pointer-events: none;
+    z-index: 1;
+    background: linear-gradient(90deg, transparent, rgba(245,242,234,0.22) 20%, rgba(245,242,234,0.22) 80%, transparent);
+    transition: opacity .5s;
+  }
+  .cover-rule.top { top: 92px; }
+  .cover-rule.bottom { bottom: 92px; }
+
+  .cover-side {
+    position: absolute;
+    top: 100px; bottom: 100px;
+    width: 4px;
+    pointer-events: none;
+    z-index: 1;
+    border-radius: 2px;
+    transition: opacity .5s;
+  }
+  .cover-side.l {
+    left: 40px;
+    background: linear-gradient(to bottom, transparent, var(--pro) 50%, transparent);
+    box-shadow: 0 0 18px var(--pro-soft);
+    animation: side-pulse 6s ease-in-out infinite;
+  }
+  .cover-side.r {
+    right: 40px;
+    background: linear-gradient(to bottom, transparent, var(--con) 50%, transparent);
+    box-shadow: 0 0 18px var(--con-soft);
+    animation: side-pulse 6s ease-in-out infinite;
+    animation-delay: -3s;
+  }
+  @keyframes side-pulse {
+    0%, 100% { opacity: .55; transform: scaleY(.85); }
+    50% { opacity: 1; transform: scaleY(1); }
+  }
+
+  .cover-dust {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .cover-dust i {
+    position: absolute;
+    width: 3px; height: 3px;
+    border-radius: 50%;
+    opacity: 0;
+    animation: dust-rise linear infinite;
+  }
+  @keyframes dust-rise {
+    0% { transform: translateY(0) translateX(0); opacity: 0; }
+    10% { opacity: 1; }
+    100% { transform: translateY(-110vh) translateX(var(--dx, 20px)); opacity: 0; }
+  }
+
+  .cover-content {
+    position: relative;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    max-width: 1100px;
+  }
+
+  .cover .eyebrow {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.5em;
+    color: rgba(245,242,234,0.78);
+    margin-bottom: 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+    transition: transform .6s, opacity .6s;
+  }
+  .cover .eyebrow::before, .cover .eyebrow::after {
+    content: '';
+    width: 36px; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(245,242,234,0.6), transparent);
+  }
+
+  .title-accent {
+    width: 120px; height: 2px;
+    margin: 0 auto 22px;
+    background: linear-gradient(90deg, var(--pro), #F5F2EA 50%, var(--con));
+    box-shadow: 0 0 14px rgba(255,255,255,0.25);
+    border-radius: 1px;
+    transition: opacity .5s, transform .5s;
+    transform-origin: center;
+  }
+
+  .cover h1 {
+    font-size: 68px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    line-height: 1.25;
+    margin-bottom: 24px;
+    white-space: nowrap;
+    color: #F5F2EA;
+    text-shadow: 0 0 40px rgba(255,255,255,0.18), 0 2px 0 rgba(0,0,0,0.4);
+    transition: transform .8s cubic-bezier(.6,0,.4,1), opacity .6s;
+  }
+  .cover h1 .ch {
+    display: inline-block;
+    opacity: 0;
+    transform: translateY(20px);
+    background: linear-gradient(180deg, #FFFFFF 0%, #C9C5BD 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: cover-char-in .8s cubic-bezier(.2,.7,.3,1) forwards;
+  }
+  @keyframes cover-char-in {
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .cover .topic {
+    font-size: 22px;
+    color: rgba(245,242,234,0.88);
+    font-style: italic;
+    margin-bottom: 18px;
+    max-width: 980px;
+    white-space: nowrap;
+    transition: opacity .6s;
+    display: inline-flex;
+    align-items: center;
+    gap: 18px;
+  }
+  .cover .topic::before, .cover .topic::after {
+    content: '';
+    width: 60px; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(245,242,234,0.4), transparent);
+  }
+
+  .cover .match-meta {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.32em;
+    color: var(--muted);
+    margin-bottom: 96px;
+    display: inline-flex;
+    gap: 18px;
+    transition: opacity .5s;
+  }
+  .cover .match-meta span + span::before {
+    content: '·';
+    margin-right: 18px;
+    opacity: 0.5;
+  }
+
+  .cover .teams {
+    display: flex;
+    gap: 200px;
+    margin-bottom: 96px;
+    align-items: flex-start;
+    position: relative;
+  }
+  .cover .team {
+    transition: transform 1s cubic-bezier(.6,0,.4,1), opacity .6s;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    animation: team-float 6s ease-in-out infinite;
+  }
+  @keyframes team-float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-6px); }
+  }
+
+  .team-badge {
+    position: relative;
+    width: 156px; height: 178px;
+    display: flex;
+    align-items: center; justify-content: center;
+    margin-bottom: 28px;
+    clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+    font-family: ui-serif, "Source Han Serif SC", serif;
+    font-size: 78px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: -0.02em;
+    text-shadow: 0 0 28px rgba(255,255,255,0.45);
+  }
+  .team.pro .team-badge {
+    background: linear-gradient(135deg, color-mix(in srgb, var(--pro) 85%, transparent), color-mix(in srgb, var(--pro) 30%, transparent));
+    box-shadow: 0 0 55px var(--pro-soft), inset 0 0 40px rgba(255,255,255,0.1);
+  }
+  .team.con .team-badge {
+    background: linear-gradient(135deg, color-mix(in srgb, var(--con) 85%, transparent), color-mix(in srgb, var(--con) 30%, transparent));
+    box-shadow: 0 0 55px var(--con-soft), inset 0 0 40px rgba(255,255,255,0.1);
+  }
+
+  .cover .team .tag {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.4em;
+    margin-bottom: 14px;
+  }
+  .cover .team.pro .tag { color: var(--pro); }
+  .cover .team.con .tag { color: var(--con); }
+  .cover .team .name {
+    font-size: 36px;
+    font-weight: 500;
+    color: var(--ink);
+    letter-spacing: 0.06em;
+  }
+
+  .cover .vs-block {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    position: relative;
+    height: 178px;
+    transition: opacity .4s, transform .6s;
+  }
+  .cover .vs {
+    font-family: ui-serif, serif;
+    font-size: 88px;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    line-height: 1;
+    background: linear-gradient(180deg, #FFF7E1 0%, #B89858 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    position: relative;
+    transform: translateY(8px);
+  }
+
+  .start-btn-wrap {
+    position: relative;
+    padding: 2px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--pro), #F5F2EA 50%, var(--con));
+    background-size: 200% 100%;
+    animation: btn-shimmer 4s linear infinite;
+    box-shadow: 0 0 30px rgba(217,77,77,0.28), 0 0 30px rgba(74,139,212,0.28);
+    transition: transform .3s, box-shadow .3s, opacity .4s;
+  }
+  .start-btn-wrap:hover {
+    transform: scale(1.04);
+    box-shadow: 0 0 55px rgba(217,77,77,0.5), 0 0 55px rgba(74,139,212,0.5);
+  }
+  @keyframes btn-shimmer {
+    0% { background-position: 0% 0; }
+    100% { background-position: 200% 0; }
+  }
+  .cover .start-btn {
+    font-size: 16px;
+    padding: 18px 64px;
+    background: var(--bg);
+    border: none;
+    border-radius: 999px;
+    color: var(--ink);
+    letter-spacing: 0.18em;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background .25s;
+  }
+  .cover .start-btn:hover { background: #16181F; }
+  .cover .start-btn .en {
+    font-family: -apple-system, sans-serif;
+    opacity: 0.55;
+    margin-left: 10px;
+    font-size: 11px;
+    letter-spacing: 0.25em;
+  }
+
+  .cover-actions {
+    position: absolute;
+    top: 36px; right: 40px;
+    z-index: 6;
+    display: flex;
+    gap: 10px;
+  }
+  .cover-pill {
+    padding: 8px 16px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 999px;
+    color: var(--ink);
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.15em;
+    cursor: pointer;
+    backdrop-filter: blur(10px);
+    transition: background .2s, border-color .2s, transform .2s;
+  }
+  .cover-pill:hover {
+    background: rgba(255,255,255,0.12);
+    border-color: rgba(255,255,255,0.3);
+    transform: scale(1.04);
+  }
+  .cover.exiting .cover-actions { opacity: 0; transition: opacity .4s; }
+
+  /* ===== Audio guide overlay ===== */
+  .audio-guide {
+    position: fixed;
+    inset: 0;
+    z-index: 250;
+    background:
+      radial-gradient(ellipse 60% 70% at 8% 88%, rgba(217,77,77,0.25), transparent 55%),
+      radial-gradient(ellipse 60% 70% at 92% 12%, rgba(74,139,212,0.25), transparent 55%),
+      var(--bg);
+    overflow-y: auto;
+    display: none;
+    flex-direction: column;
+    padding: 60px 80px;
+    opacity: 0;
+    transition: opacity .4s ease;
+  }
+  .audio-guide.show { display: flex; opacity: 1; }
+  .ag-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 40px;
+  }
+  .ag-head .title {
+    font-family: ui-serif, "Source Han Serif SC", serif;
+    font-size: 32px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    background: linear-gradient(180deg, #FFFFFF 0%, #C9C5BD 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .ag-head .subtitle {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.25em;
+    margin-top: 6px;
+  }
+  .ag-back {
+    padding: 10px 20px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 999px;
+    color: var(--ink);
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 13px;
+    letter-spacing: 0.15em;
+    cursor: pointer;
+    transition: background .2s, transform .2s;
+  }
+  .ag-back:hover { background: rgba(255,255,255,0.12); transform: scale(1.04); }
+
+  .ag-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 18px;
+    max-width: 1400px;
+    width: 100%;
+    margin: 0 auto;
+  }
+  .ag-card {
+    background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01));
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    transition: border-color .25s, transform .25s, box-shadow .25s;
+    position: relative;
+    overflow: hidden;
+  }
+  .ag-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 100% 0%, var(--accent, transparent) 0%, transparent 60%);
+    opacity: 0.15;
+    pointer-events: none;
+  }
+  .ag-card:hover {
+    border-color: rgba(255,255,255,0.25);
+    transform: translateY(-2px);
+    box-shadow: 0 12px 30px rgba(0,0,0,0.4);
+  }
+  .ag-card .ag-name {
+    font-family: ui-serif, "Source Han Serif SC", serif;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--ink);
+    letter-spacing: 0.05em;
+  }
+  .ag-card .ag-tag {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 10px;
+    letter-spacing: 0.25em;
+    color: var(--accent, var(--muted));
+    text-transform: uppercase;
+  }
+  .ag-card .ag-when {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 13px;
+    color: rgba(245,242,234,0.78);
+    line-height: 1.65;
+  }
+  .ag-card .ag-detail {
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.02em;
+    padding: 8px 12px;
+    background: rgba(0,0,0,0.3);
+    border-radius: 6px;
+    border-left: 2px solid var(--accent, var(--muted));
+  }
+  .ag-card .ag-play {
+    align-self: flex-start;
+    margin-top: auto;
+    padding: 8px 18px;
+    background: var(--accent, rgba(255,255,255,0.1));
+    border: none;
+    border-radius: 999px;
+    color: #fff;
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.15em;
+    cursor: pointer;
+    transition: transform .15s, box-shadow .25s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .ag-card .ag-play:hover {
+    transform: scale(1.06);
+    box-shadow: 0 0 22px var(--accent, rgba(255,255,255,0.2));
+  }
+  .ag-card.pulse {
+    animation: ag-pulse .8s ease-out;
+  }
+  @keyframes ag-pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.02); box-shadow: 0 0 30px var(--accent); }
+    100% { transform: scale(1); }
+  }
+
+  /* color accents per card */
+  .ag-card.c-tick    { --accent: #FFB454; }
+  .ag-card.c-thirty  { --accent: #FFB454; }
+  .ag-card.c-gavel   { --accent: var(--pro); }
+  .ag-card.c-shield  { --accent: var(--good); }
+  .ag-card.c-crystal { --accent: var(--good); }
+  .ag-card.c-thump   { --accent: #9D7BE0; }
+
+  .cover-hints {
+    position: absolute;
+    bottom: 18px;
+    left: 50%; transform: translateX(-50%);
+    z-index: 5;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px 22px;
+    width: max-content;
+    max-width: min(880px, 94vw);
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.15em;
+    transition: opacity .5s, transform .5s;
+  }
+  /* short windows: the hints would collide with the start button — drop them */
+  @media (max-height: 780px) {
+    .cover-hints { display: none; }
+  }
+  .cover-hints span { display: inline-flex; align-items: center; }
+  .cover-hints kbd {
+    font-family: "SF Mono", ui-monospace, monospace;
+    background: rgba(255,255,255,0.05);
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(255,255,255,0.1);
+    color: var(--ink);
+    margin-right: 8px;
+    font-size: 10px;
+  }
+
+  .cover.hidden { opacity: 0; pointer-events: none; }
+  .cover.exiting .eyebrow { opacity: 0; transform: translateY(-40px); }
+  .cover.exiting .title-accent { opacity: 0; transform: scaleX(0); }
+  .cover.exiting h1 { opacity: 0; transform: translateY(-60px); }
+  .cover.exiting .topic { opacity: 0; }
+  .cover.exiting .match-meta { opacity: 0; }
+  .cover.exiting .team.pro { transform: translateX(-60vw); opacity: 0; }
+  .cover.exiting .team.con { transform: translateX(60vw); opacity: 0; }
+  .cover.exiting .vs-block { opacity: 0; transform: scale(3); }
+  .cover.exiting .start-btn-wrap { opacity: 0; transform: scale(0.8); }
+  .cover.exiting .cover-hints { opacity: 0; transform: translate(-50%, 40px); }
+  .cover.exiting .cover-frame,
+  .cover.exiting .cover-rule,
+  .cover.exiting .cover-side,
+  .cover.exiting .cover-watermark { opacity: 0; }
+
+  /* ===== Settings modal ===== */
+  .settings-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.6);
+    backdrop-filter: blur(8px);
+  }
+  .settings-modal.show { display: flex; }
+  .settings-panel {
+    width: 520px;
+    max-width: calc(100vw - 40px);
+    background: linear-gradient(180deg, #1A1E27, #14171F);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 14px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04);
+    overflow: hidden;
+    animation: settings-in .3s cubic-bezier(.2,.7,.3,1);
+  }
+  @keyframes settings-in {
+    from { opacity: 0; transform: translateY(20px) scale(0.96); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .settings-head {
+    padding: 18px 24px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: linear-gradient(90deg, color-mix(in srgb, var(--pro) 12%, transparent), color-mix(in srgb, var(--con) 12%, transparent));
+  }
+  .settings-head h2 {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.15em;
+    color: var(--ink);
+  }
+  .settings-close {
+    width: 28px; height: 28px;
+    padding: 0;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    border-radius: 6px;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .settings-close:hover { background: rgba(255,255,255,0.12); color: var(--ink); }
+  .settings-body {
+    padding: 22px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .settings-body label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    color: var(--muted);
+    flex: 1;
+  }
+  .settings-body label > span {
+    display: flex; align-items: center; gap: 6px;
+    text-transform: uppercase;
+  }
+  .settings-body .dot-pro { color: var(--pro); font-size: 10px; }
+  .settings-body .dot-con { color: var(--con); font-size: 10px; }
+  .settings-body input {
+    width: 100%;
+    padding: 10px 12px;
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--ink);
+    font-family: ui-serif, "Source Han Serif SC", serif;
+    font-size: 14px;
+    letter-spacing: 0.03em;
+    transition: border-color .15s, background .15s;
+  }
+  .settings-body input:focus {
+    outline: none;
+    background: rgba(0,0,0,0.5);
+    border-color: rgba(255,255,255,0.25);
+  }
+  .settings-body .row-2 {
+    display: flex;
+    gap: 12px;
+  }
+  .settings-foot {
+    padding: 16px 24px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    background: rgba(0,0,0,0.2);
+  }
+
+  /* countdown 3-2-1 */
+  .countdown {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.55);
+    backdrop-filter: blur(8px);
+  }
+  .countdown.show { display: flex; }
+  .countdown .num {
+    font-family: ui-serif, serif;
+    font-size: 260px;
+    font-weight: 700;
+    background: linear-gradient(180deg, #FFFFFF 0%, var(--pro) 50%, var(--con) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    text-shadow: 0 0 80px rgba(255,255,255,0.4);
+    animation: countdown-pop 0.95s cubic-bezier(.2,.7,.3,1) forwards;
+  }
+  @keyframes countdown-pop {
+    0% { opacity: 0; transform: scale(0.3); filter: blur(20px); }
+    30% { opacity: 1; transform: scale(1); filter: blur(0); }
+    75% { opacity: 1; transform: scale(1.05); }
+    100% { opacity: 0; transform: scale(2.2); filter: blur(6px); }
+  }
+
+  /* ===== Time-up impact (rem === 0) ===== */
+  .shockwave {
+    position: fixed;
+    left: 50%; top: 50%;
+    width: 40px; height: 40px;
+    margin: -20px 0 0 -20px;
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 98;
+    opacity: 0;
+  }
+  .shockwave.run { animation: shockwave-burst 0.95s cubic-bezier(.15,.7,.3,1) forwards; }
+  body.pro-turn .shockwave.run {
+    border: 4px solid #fff;
+    box-shadow:
+      0 0 60px 12px #fff,
+      0 0 120px 30px var(--pro),
+      inset 0 0 40px 6px var(--pro-soft);
+  }
+  body.con-turn .shockwave.run {
+    border: 4px solid #fff;
+    box-shadow:
+      0 0 60px 12px #fff,
+      0 0 120px 30px var(--con),
+      inset 0 0 40px 6px var(--con-soft);
+  }
+  @keyframes shockwave-burst {
+    0%   { width: 40px; height: 40px; margin: -20px 0 0 -20px; opacity: 1; border-width: 6px; }
+    60%  { opacity: 0.85; }
+    100% { width: 240vmax; height: 240vmax; margin: -120vmax 0 0 -120vmax; opacity: 0; border-width: 0.5px; }
+  }
+  .shockwave::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.6);
+    opacity: 0;
+  }
+  .shockwave.run::after { animation: shockwave-inner 0.95s cubic-bezier(.2,.7,.3,1) 0.08s forwards; }
+  @keyframes shockwave-inner {
+    0%   { transform: scale(1); opacity: 0.9; }
+    100% { transform: scale(8); opacity: 0; }
+  }
+
+  /* full-screen red/black flash */
+  .time-up-veil {
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 97;
+    opacity: 0;
+    background: radial-gradient(circle at center, transparent 30%, rgba(0,0,0,0.85) 100%), var(--pro);
+    mix-blend-mode: multiply;
+  }
+  body.con-turn .time-up-veil {
+    background: radial-gradient(circle at center, transparent 30%, rgba(0,0,0,0.85) 100%), var(--con);
+  }
+  .time-up-veil.run { animation: time-up-veil 0.7s steps(4) forwards; }
+  @keyframes time-up-veil {
+    0%   { opacity: 0; }
+    8%   { opacity: 0.85; }
+    16%  { opacity: 0; }
+    24%  { opacity: 0.7; }
+    32%  { opacity: 0; }
+    100% { opacity: 0; }
+  }
+
+  /* digit slam + chromatic aberration on the active timer */
+  body.time-up .timer-block.active .time {
+    animation: digit-slam 0.55s cubic-bezier(.2,1.6,.3,1), chroma-split 0.5s steps(6) !important;
+    text-shadow:
+      3px 0 0 rgba(255, 60, 60, 0.85),
+     -3px 0 0 rgba(60, 180, 255, 0.85),
+      0 0 28px rgba(255,255,255,0.6) !important;
+  }
+  @keyframes digit-slam {
+    0%   { transform: translateY(-22px) scale(1.18); filter: brightness(2); letter-spacing: 0.04em; }
+    25%  { transform: translateY(12px) scale(0.96); }
+    55%  { transform: translateY(-3px) scale(1.04); }
+    100% { transform: translateY(0) scale(1); filter: brightness(1); }
+  }
+  @keyframes chroma-split {
+    0%   { text-shadow: 6px 0 0 rgba(255,60,60,0.9), -6px 0 0 rgba(60,180,255,0.9), 0 0 40px #fff; }
+    50%  { text-shadow: 3px 0 0 rgba(255,60,60,0.7), -3px 0 0 rgba(60,180,255,0.7), 0 0 20px #fff; }
+    100% { text-shadow: 0 0 0 transparent, 0 0 0 transparent, 0 0 14px rgba(255,255,255,0.4); }
+  }
+
+  /* stage micro-zoom punch */
+  body.time-up .stage { animation: stage-punch 0.45s cubic-bezier(.3,1.3,.4,1); }
+  @keyframes stage-punch {
+    0%   { transform: scale(1); }
+    25%  { transform: scale(1.012); }
+    100% { transform: scale(1); }
+  }
+
+  /* Cover collision flash */
+  .cover-flash {
+    position: fixed; inset: 0; z-index: 99;
+    pointer-events: none; opacity: 0;
+    background: radial-gradient(circle at center, #fff, transparent 50%);
+  }
+  .cover-flash.run { animation: cover-flash .9s ease-out; }
+  @keyframes cover-flash {
+    0% { opacity: 0; transform: scale(0.2); }
+    45% { opacity: 1; }
+    100% { opacity: 0; transform: scale(2.5); }
+  }
+
+  /* Stage-enter sequence (when match starts) */
+  body.entering .topbar .bar.pro { animation: bar-enter-l .9s cubic-bezier(.5,0,.2,1) backwards; }
+  body.entering .topbar .bar.con { animation: bar-enter-r .9s cubic-bezier(.5,0,.2,1) backwards; }
+  @keyframes bar-enter-l { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+  @keyframes bar-enter-r { from { transform: translateX(100%); } to { transform: translateX(0); } }
+
+  /* Fullscreen */
+  :fullscreen .stage-name { font-size: 88px; }
+  :fullscreen .timer-block .time { font-size: 120px; }
+  :fullscreen .timer-block.solo .time { font-size: 220px; }
+
+  .sidebar::-webkit-scrollbar { width: 4px; }
+  .sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+  /* ===================================================================
+     PERFORMANCE — composition hints + dramatic mode load-shedding
+     =================================================================== */
+  /* promote continuously-animated layers to their own GPU compositor layer */
+  #embers,
+  .atmos .aurora,
+  .atmos .sweep,
+  .atmos .pulse,
+  .atmos .glow,
+  .shockwave,
+  .time-up-veil,
+  .collision > div,
+  .flash-overlay,
+  .cover-flash,
+  .radar { transform: translateZ(0); }
+
+  .atmos .aurora, .atmos .sweep, .atmos .pulse { will-change: transform, opacity; }
+
+  /* isolate repaint regions so a flicker in one block doesn't repaint siblings */
+  .timer-block,
+  .center-divider,
+  .power-bar,
+  .topbar .bar { contain: layout paint; }
+
+  /* === Dramatic mode === active when the screen is doing big impact work:
+     last-3-second countdown, time-up shockwave, side-switch collision.
+     Shed every ambient animation to free GPU for the hero moments. */
+  body.final-3 .atmos .aurora,
+  body.time-up .atmos .aurora,
+  body.colliding .atmos .aurora,
+  body.final-3 .atmos .sweep,
+  body.time-up .atmos .sweep,
+  body.colliding .atmos .sweep,
+  body.final-3 .atmos .pulse,
+  body.time-up .atmos .pulse,
+  body.colliding .atmos .pulse,
+  body.final-3 .topbar .bar::after,
+  body.time-up .topbar .bar::after,
+  body.colliding .topbar .bar::after,
+  body.final-3 .power-bar .fill-pro::after,
+  body.final-3 .power-bar .fill-con::after,
+  body.colliding .power-bar .fill-pro::after,
+  body.colliding .power-bar .fill-con::after,
+  body.time-up  .power-bar .fill-pro::after,
+  body.time-up  .power-bar .fill-con::after { animation-play-state: paused !important; }
+
+  /* hide low-value blur layers during the hero moments */
+  body.final-3 .atmos .aurora,
+  body.time-up .atmos .aurora,
+  body.colliding .atmos .aurora { opacity: 0.35 !important; }
+
+  /* backdrop-filter is the single most expensive composite op —
+     swap to opaque tint during dramatic moments */
+  body.final-3 .sidebar,
+  body.final-3 .controls,
+  body.time-up .sidebar,
+  body.time-up .controls,
+  body.colliding .sidebar,
+  body.colliding .controls {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: rgba(11,13,18,0.94);
+  }
+
+  /* lock the active timer's text-shadow during final-3 / colliding so
+     it doesn't recompute calc() every tick. (time-up has its own chroma-split.) */
+  body.final-3 .timer-block.pro.active .time,
+  body.colliding .timer-block.pro.active .time {
+    text-shadow:
+      0 0 28px var(--pro),
+      0 0 72px var(--pro-soft);
+  }
+  body.final-3 .timer-block.con.active .time,
+  body.colliding .timer-block.con.active .time {
+    text-shadow:
+      0 0 28px var(--con),
+      0 0 72px var(--con-soft);
+  }
+
+  /* Overtime jitter — throttled from every-60ms-paint to a bursty 0.4s cycle.
+     Same visual energy, ~3× fewer repaints. */
+  body.overtime .timer-block.active .time {
+    animation: time-jitter 0.4s steps(4) infinite !important;
+  }
+
+  /* ===== Toast — transient operator feedback ===== */
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 96px;
+    transform: translate(-50%, 16px);
+    z-index: 60;
+    padding: 10px 22px;
+    border-radius: 24px;
+    background: rgba(20, 23, 31, 0.92);
+    border: 1px solid rgba(255,255,255,0.14);
+    color: var(--ink);
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 14px;
+    letter-spacing: 0.04em;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .25s ease, transform .25s ease;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  /* ===== Resume banner — offered on the cover after a refresh ===== */
+  .resume-banner {
+    position: fixed;
+    top: 24px;
+    left: 50%;
+    transform: translate(-50%, -12px);
+    z-index: 55;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 20px;
+    border-radius: 12px;
+    background: rgba(20, 23, 31, 0.95);
+    border: 1px solid rgba(255, 180, 84, 0.35);
+    color: var(--ink);
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 14px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .3s ease, transform .3s ease;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.55);
+  }
+  .resume-banner.show { opacity: 1; pointer-events: auto; transform: translate(-50%, 0); }
+  .resume-banner button {
+    padding: 6px 16px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.15);
+    background: rgba(255,255,255,0.06);
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background .2s;
+  }
+  .resume-banner button:hover { background: rgba(255,255,255,0.12); }
+  .resume-banner .rb-resume {
+    background: rgba(255, 180, 84, 0.18);
+    border-color: rgba(255, 180, 84, 0.4);
+    color: var(--warn);
+  }
+  .resume-banner .rb-resume:hover { background: rgba(255, 180, 84, 0.3); }
+
+  /* ===== Turn log — dual-stage speech history chips ===== */
+  .turn-log {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 14px;
+    max-width: 720px;
+    font-family: -apple-system, "PingFang SC", sans-serif;
+  }
+  .turn-log:empty { display: none; }
+  .turn-log .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 12px;
+    border-radius: 14px;
+    font-size: 12px;
+    letter-spacing: 0.03em;
+    font-variant-numeric: tabular-nums;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    background: rgba(255,255,255,0.03);
+  }
+  .turn-log .chip .n { opacity: 0.55; }
+  .turn-log .chip.pro { color: var(--pro); border-color: color-mix(in srgb, var(--pro) 35%, transparent); }
+  .turn-log .chip.con { color: var(--con); border-color: color-mix(in srgb, var(--con) 35%, transparent); }
+
+  /* ===== Settings additions: volume + per-stage durations ===== */
+  .settings-body .vol-row {
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+  }
+  .settings-body .vol-row > span:first-child { flex-shrink: 0; }
+  .settings-body .vol-row input[type="range"] {
+    flex: 1;
+    width: auto;
+    padding: 0;
+    accent-color: var(--warn);
+    background: transparent;
+    border: none;
+  }
+  .settings-body .vol-val {
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    min-width: 42px;
+    text-align: right;
+    text-transform: none;
+  }
+  .settings-body .dur-edit {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-family: -apple-system, "PingFang SC", sans-serif;
+  }
+  .settings-body .dur-edit summary {
+    cursor: pointer;
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    color: var(--muted);
+    text-transform: uppercase;
+    user-select: none;
+  }
+  .settings-body .dur-edit[open] summary { margin-bottom: 10px; }
+  .settings-body .dur-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+  .settings-body .dur-row > span:first-child {
+    flex: 1;
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    color: var(--ink);
+    opacity: 0.85;
+  }
+  .settings-body .dur-row input {
+    width: 84px;
+    flex: none;
+    padding: 6px 10px;
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 13px;
+    text-align: right;
+  }
+  .settings-body .dur-row .dur-def {
+    font-size: 11px;
+    color: var(--muted);
+    min-width: 74px;
+    text-transform: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .settings-body .dur-reset {
+    margin-top: 8px;
+    padding: 6px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: rgba(255,255,255,0.05);
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .settings-body .dur-reset:hover { background: rgba(255,255,255,0.1); color: var(--ink); }
+
+  /* ===== Burning digits — flame flicker on the active timer at high heat.
+     Animated on the block (filter), not .time, so it never fights the
+     per-second .tick transform animation. ===== */
+  .timer-block.active.burning {
+    animation: digit-burn 0.7s ease-in-out infinite;
+  }
+  @keyframes digit-burn {
+    0%, 100% { filter: brightness(1); }
+    28% { filter: brightness(1.22) saturate(1.2); }
+    52% { filter: brightness(1.04); }
+    78% { filter: brightness(1.3) saturate(1.25); }
+  }
+
+  /* ===== Report modal text ===== */
+  .report-text {
+    font-family: "SF Mono", ui-monospace, "Menlo", monospace;
+    font-size: 12.5px;
+    line-height: 1.75;
+    color: var(--ink);
+    white-space: pre-wrap;
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    max-height: 46vh;
+    overflow-y: auto;
+  }
+
+  /* ===== Stage progress indicator ===== */
+  .stage-progress {
+    display: none;
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.35em;
+    color: var(--muted);
+    text-align: center;
+    margin-bottom: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .center .stage-progress { display: block; }
+
+  /* ===== Small screens / low-res projectors ===== */
+  @media (max-width: 1100px) {
+    .stage-name { font-size: 48px; white-space: normal; }
+    .timer-block .time { font-size: 72px; }
+    .timer-block.solo .time { font-size: 120px; }
+    .cover h1 { font-size: 44px; white-space: normal; }
+  }
+  @media (max-width: 760px) {
+    .stage-name { font-size: 34px; }
+    .timer-block .time { font-size: 48px; }
+    .timer-block.solo .time { font-size: 80px; }
+    .cover h1 { font-size: 30px; }
+    .countdown .num { font-size: 160px; }
+    .controls { flex-wrap: wrap; }
+  }
+
+  /* ===== Reduced motion — kill every continuous ambient animation;
+     the clock itself stays fully functional ===== */
+  @media (prefers-reduced-motion: reduce) {
+    .atmos .aurora,
+    .atmos .sweep,
+    .atmos .pulse,
+    .atmos .glow,
+    .timer-block.active.burning,
+    .cover-dust i,
+    .radar::before,
+    .radar::after,
+    .topbar .bar::after,
+    body.overtime .timer-block.active .time {
+      animation: none !important;
+    }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="embers"></canvas>
+
+<div class="atmos">
+  <div class="glow pro"></div>
+  <div class="glow con"></div>
+  <div class="aurora pro"></div>
+  <div class="aurora con"></div>
+  <div class="sweep pro"></div>
+  <div class="sweep con"></div>
+  <div class="pulse pro"></div>
+  <div class="pulse con"></div>
+</div>
+
+<div class="radar"></div>
+<div class="shield">
+  <div class="qmark-veil"></div>
+  <div class="qmark-main">?</div>
+  <div class="qmark-burst">
+    <span>?</span><span>?</span><span>?</span><span>?</span><span>?</span>
+  </div>
+</div>
+<div class="flash-overlay" id="flashOverlay"></div>
+<div class="cover-flash" id="coverFlash"></div>
+<div class="time-up-veil" id="timeUpVeil"></div>
+<div class="shockwave" id="shockwave"></div>
+<div class="collision" id="collision">
+  <div class="collide-pro"></div>
+  <div class="collide-con"></div>
+  <div class="collide-seam"></div>
+  <div class="collide-burst"></div>
+</div>
+<div class="countdown" id="countdown"><div class="num" id="countdownNum">3</div></div>
+
+<div class="toast" id="toast"></div>
+<div class="resume-banner" id="resumeBanner">
+  <span id="resumeText">检测到未完成的比赛</span>
+  <button class="rb-resume" onclick="resumeMatch()">恢复进度</button>
+  <button class="rb-discard" onclick="discardMatch()">放弃</button>
+</div>
+
+<div class="stage">
+
+  <div class="topbar">
+    <div class="bar pro" id="proBar">
+      <div class="seal">正</div>
+      <div class="team-name">
+        <span class="label">PRO · 正方</span>
+        <span id="proName">队伍待定</span>
+      </div>
+    </div>
+    <div class="bar con" id="conBar">
+      <div class="team-name">
+        <span class="label">CON · 反方</span>
+        <span id="conName">队伍待定</span>
+      </div>
+      <div class="seal">反</div>
+    </div>
+  </div>
+
+  <div class="titlestrip">
+    <div class="title" id="matchTitle">辩论赛</div>
+    <div class="topic" id="matchTopic">辩题待定</div>
+  </div>
+
+  <div class="main">
+    <button class="sidebar-toggle" onclick="toggleSidebar()" title="流程列表">☰</button>
+    <aside class="sidebar" id="sidebar"></aside>
+
+    <section class="center" id="center">
+      <div class="cover" id="cover">
+        <div class="cover-dust" id="coverDust"></div>
+        <div class="cover-side l"></div>
+        <div class="cover-side r"></div>
+        <div class="cover-actions">
+          <button class="cover-pill" onclick="openAudioGuide()" title="音效说明">♪ 音效</button>
+          <button class="cover-pill" onclick="openSettings()" title="赛事设置">⚙ 设置</button>
+        </div>
+
+        <div class="cover-content">
+          <div class="eyebrow">DEBATE · 辩 论 赛</div>
+          <div class="title-accent"></div>
+          <h1 id="coverTitle">辩论赛</h1>
+          <div class="topic" id="coverTopic">「 辩题待定 」</div>
+          <div class="match-meta">
+            <span id="coverRound">第 01 场</span>
+            <span id="coverDate">日期待定</span>
+          </div>
+          <div class="teams">
+            <div class="team pro">
+              <div class="team-badge"><span class="ch">正</span></div>
+              <div class="tag">PRO · 正方</div>
+              <div class="name" id="coverPro">队伍待定</div>
+            </div>
+            <div class="vs-block">
+              <div class="vs">VS</div>
+            </div>
+            <div class="team con">
+              <div class="team-badge"><span class="ch">反</span></div>
+              <div class="tag">CON · 反方</div>
+              <div class="name" id="coverCon">队伍待定</div>
+            </div>
+          </div>
+          <div class="start-btn-wrap">
+            <button class="start-btn" onclick="startMatch()">开 始 比 赛<span class="en">BEGIN →</span></button>
+          </div>
+        </div>
+
+        <div class="cover-hints">
+          <span><kbd>Space</kbd>开始</span>
+          <span><kbd>← →</kbd>切换环节</span>
+          <span><kbd>S</kbd>切换发言方</span>
+          <span><kbd>Q</kbd>质询答/问</span>
+          <span><kbd>Z</kbd>撤销</span>
+          <span><kbd>M</kbd>静音</span>
+          <span><kbd>F</kbd>全屏</span>
+        </div>
+      </div>
+
+      <div class="stage-progress" id="stageProgress"></div>
+      <div class="stage-name" id="stageName">开场</div>
+      <div class="stage-meta" id="stageMeta">点击「开始比赛」进入流程</div>
+      <div class="timers" id="timers"></div>
+      <div class="time-adjust" id="timeAdjust">
+        <span class="ta-label" id="taLabel">微调</span>
+        <button onclick="adjustTime(-10)" title="给当前发言方多 10 秒">+10s</button>
+        <button onclick="adjustTime(-5)"  title="给当前发言方多 5 秒">+5s</button>
+        <button onclick="adjustTime(5)"   title="扣当前发言方 5 秒">−5s</button>
+        <button onclick="adjustTime(10)"  title="扣当前发言方 10 秒">−10s</button>
+      </div>
+      <div class="power-bar-wrap">
+        <div class="power-bar" id="powerBar">
+          <div class="fill-pro"></div>
+          <div class="fill-con"></div>
+          <div class="tear" id="powerBarTear"></div>
+        </div>
+        <div class="power-bar-labels">
+          <span class="l-pro">正方用时</span>
+          <span class="l-con">反方用时</span>
+        </div>
+      </div>
+      <div class="status-row" id="statusRow"></div>
+      <div class="turn-log" id="turnLog"></div>
+    </section>
+  </div>
+
+  <div class="controls">
+    <div class="btn-group">
+      <span class="label">计时</span>
+      <button class="primary" id="playBtn" onclick="toggleTimer()">▶ 开始 <kbd>Space</kbd></button>
+      <button onclick="uiReset()">重置 <kbd>R</kbd></button>
+      <button onclick="switchSide()" id="switchBtn" style="display:none">切换发言方 <kbd>S</kbd></button>
+      <button onclick="triggerProtect()" id="protectBtn" style="display:none">新问答 <kbd>Q</kbd></button>
+    </div>
+    <div class="btn-group">
+      <span class="label">环节</span>
+      <button onclick="uiPrev()">← 上一个</button>
+      <button onclick="uiNext()">下一个 →</button>
+    </div>
+    <div class="btn-group">
+      <span class="label">视图</span>
+      <button onclick="openSettings()">⚙ 设置</button>
+      <button onclick="openReport()">📋 报告</button>
+      <button id="muteBtn" onclick="toggleMute()">🔊 音效 <kbd>M</kbd></button>
+      <button onclick="toggleFullscreen()">全屏 <kbd>F</kbd></button>
+      <button onclick="backToCover()">返回封面</button>
+    </div>
+  </div>
+</div>
+
+<div class="audio-guide" id="audioGuide">
+  <div class="ag-head">
+    <div>
+      <div class="title">音 效 说 明</div>
+      <div class="subtitle">SOUND DESIGN · 全部由 Web Audio 实时合成</div>
+    </div>
+    <button class="ag-back" onclick="closeAudioGuide()">← 返回封面</button>
+  </div>
+  <div class="ag-grid">
+    <div class="ag-card c-tick">
+      <div class="ag-tag">COUNTDOWN</div>
+      <div class="ag-name">倒计时滴答</div>
+      <div class="ag-when">发言剩余最后 3 / 2 / 1 秒,每秒响一声,音调递升,营造紧迫感。</div>
+      <div class="ag-detail">三角波 · 440 / 523 / 659 Hz · 0.14s</div>
+      <button class="ag-play" onclick="playDemo(this, 'tickSeq')">▶ 试听 3-2-1</button>
+    </div>
+    <div class="ag-card c-thirty">
+      <div class="ag-tag">30 SECOND WARNING</div>
+      <div class="ag-name">30 秒提醒</div>
+      <div class="ag-when">发言剩余 30 秒时响一声温和叮咚,提示该收尾。不影响发言节奏。</div>
+      <div class="ag-detail">双音正弦 · C5 523Hz + G5 784Hz · 错开 80ms</div>
+      <button class="ag-play" onclick="playDemo(this, 'thirty')">▶ 试听</button>
+    </div>
+    <div class="ag-card c-gavel">
+      <div class="ag-tag">TIME UP</div>
+      <div class="ag-name">法槌三连</div>
+      <div class="ag-when">发言时间归零时触发,三声叠加正弦由低到高,如同法槌落下宣告时间到。也用于入场倒计时结束。</div>
+      <div class="ag-detail">正弦波 · 220 → 440 → 880 Hz · 每声延迟 60ms</div>
+      <button class="ag-play" onclick="playDemo(this, 'gavel')">▶ 试听</button>
+    </div>
+    <div class="ag-card c-shield">
+      <div class="ag-tag">PROTECT START</div>
+      <div class="ag-name">护盾低鸣</div>
+      <div class="ag-when">质询环节开始时响起,标志着答辩方进入 5 秒保护期,质询方不可打断。</div>
+      <div class="ag-detail">锯齿波 · 60 Hz · 0.5s 持续</div>
+      <button class="ag-play" onclick="playDemo(this, 'shieldHum')">▶ 试听</button>
+    </div>
+    <div class="ag-card c-crystal">
+      <div class="ag-tag">PROTECT END</div>
+      <div class="ag-name">水晶铃</div>
+      <div class="ag-when">保护期 5 秒结束时响起,双音高频清脆铃声,提示质询方现在可以打断答辩。</div>
+      <div class="ag-detail">正弦波 · 1568 + 2349 Hz · 0.6s 余韵</div>
+      <button class="ag-play" onclick="playDemo(this, 'crystal')">▶ 试听</button>
+    </div>
+    <div class="ag-card c-thump">
+      <div class="ag-tag">SIDE SWITCH</div>
+      <div class="ag-name">宝剑相碰</div>
+      <div class="ag-when">对辩 / 自由辩切换发言方时触发(按 S 键),金属铿锵 + 低沉撞击 + 余韵泛音 + 剑刃刮擦,配合屏幕色块对撞动效。</div>
+      <div class="ag-detail">高通噪声 strike + 5 段非谐波正弦 + 170→55Hz body thump + saw 刮擦扫频 · 总长 ≈ 0.65s</div>
+      <button class="ag-play" onclick="playDemo(this, 'collide')">▶ 试听</button>
+    </div>
+  </div>
+</div>
+
+<div class="settings-modal" id="settingsModal">
+  <div class="settings-panel">
+    <div class="settings-head">
+      <h2>赛事设置</h2>
+      <button class="settings-close" onclick="closeSettings()">×</button>
+    </div>
+    <div class="settings-body">
+      <label><span>比赛标题</span><input type="text" id="setTitle" placeholder="如:XX学院辩论赛 · 第一周"></label>
+      <label><span>辩题</span><input type="text" id="setTopic" placeholder="如:AI 会让人变笨"></label>
+      <div class="row-2">
+        <label><span>场次</span><input type="text" id="setRound" placeholder="第 01 场"></label>
+        <label><span>日期</span><input type="text" id="setDate" placeholder="如:2026.01.01"></label>
+      </div>
+      <div class="row-2">
+        <label><span class="dot-pro">●</span><span>正方队名</span><input type="text" id="setPro" placeholder="队伍 A"></label>
+        <label><span class="dot-con">●</span><span>反方队名</span><input type="text" id="setCon" placeholder="队伍 B"></label>
+      </div>
+      <label class="vol-row"><span>音效音量</span>
+        <input type="range" id="setVol" min="0" max="100" step="5">
+        <span class="vol-val" id="setVolVal">100%</span>
+      </label>
+      <details class="dur-edit">
+        <summary>环节时长（秒）</summary>
+        <div id="durList"></div>
+        <button type="button" class="dur-reset" onclick="resetDurInputs()">恢复默认时长</button>
+      </details>
+    </div>
+    <div class="settings-foot">
+      <button onclick="closeSettings()">取消</button>
+      <button class="primary" onclick="saveSettings()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="settings-modal" id="reportModal">
+  <div class="settings-panel">
+    <div class="settings-head">
+      <h2>赛程报告</h2>
+      <button class="settings-close" onclick="closeReport()">×</button>
+    </div>
+    <div class="settings-body">
+      <pre class="report-text" id="reportText"></pre>
+    </div>
+    <div class="settings-foot">
+      <button onclick="downloadReport()">下载 .txt</button>
+      <button class="primary" onclick="copyReport()">复制</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const STAGES = [
+  { group: '开场', name: '双方团队自我介绍', side: 'neutral', type: 'single', noTimer: true,
+    meta: '双方调整飞书会议名称(正/反方+X辩+姓名),打开摄像头;由正反方 1-5 辩依次自我介绍。' },
+
+  { group: '开篇明义', name: '正方一辩 · 开篇立论', duration: 220, side: 'pro', type: 'single',
+    meta: '正方一辩陈述本方论点及论据。发言时间 3 分 40 秒。' },
+  { group: '开篇明义', name: '反方五辩 · 质疑正方一辩', duration: 90, side: 'con', type: 'single', protect: 5,
+    meta: '反方提问。回答方享 5 秒保护时间,5 秒后方可打断。回答方只能回答问题,不能反问。' },
+  { group: '开篇明义', name: '反方一辩 · 开篇立论', duration: 220, side: 'con', type: 'single',
+    meta: '反方一辩陈述本方论点及论据。发言时间 3 分 40 秒。' },
+  { group: '开篇明义', name: '正方五辩/四辩 · 质疑反方一辩', duration: 90, side: 'pro', type: 'single', protect: 5,
+    meta: '正方提问。回答方享 5 秒保护时间,5 秒后方可打断。回答方只能回答问题,不能反问。' },
+
+  { group: '申论环节', name: '正方二辩 · 申论', duration: 120, side: 'pro', type: 'single',
+    meta: '可选择申论、反驳或申论 + 反驳形式陈述。时间 2 分钟。' },
+  { group: '申论环节', name: '反方二辩 · 申论', duration: 120, side: 'con', type: 'single',
+    meta: '可选择申论、反驳或申论 + 反驳形式陈述。时间 2 分钟。' },
+  { group: '申论环节', name: '对辩环节 · 双方二辩', duration: 90, type: 'dual', startSide: 'pro',
+    meta: '双方二辩对辩,一方回答或停止回答后另一方才可发言。单边计时,每方各 1 分 30 秒。' },
+
+  { group: '盘问环节', name: '反方三辩 · 盘问', duration: 90, side: 'con', type: 'single', protect: 5,
+    meta: '反方三辩盘问对方除正方三辩以外的选手。回答方享 5 秒保护时间。质疑方可任意选择和更换回答人选。' },
+  { group: '盘问环节', name: '反方 · 盘问小结', duration: 60, side: 'con', type: 'single',
+    meta: '反方三辩对整个盘问过程进行总结。时间 60 秒。' },
+  { group: '盘问环节', name: '正方三辩 · 盘问', duration: 90, side: 'pro', type: 'single', protect: 5,
+    meta: '正方三辩盘问对方除反方三辩以外的选手。回答方享 5 秒保护时间。质疑方可任意选择和更换回答人选。' },
+  { group: '盘问环节', name: '正方 · 盘问小结', duration: 60, side: 'pro', type: 'single',
+    meta: '正方三辩对整个盘问过程进行总结。时间 60 秒。' },
+
+  { group: '补充说明', name: '正方四辩 · 补充说明', duration: 60, side: 'pro', type: 'single',
+    meta: '针对质疑环节提出或未能解决的问题进行补充说明。时间 60 秒。' },
+  { group: '补充说明', name: '反方四辩 · 补充说明', duration: 60, side: 'con', type: 'single',
+    meta: '针对质疑环节提出或未能解决的问题进行补充说明。时间 60 秒。' },
+
+  { group: '自由辩论', name: '自由辩环节', duration: 240, type: 'dual', startSide: 'pro',
+    meta: '双方轮换发言,一方回答结束后另一方才可发言;每一方不得连续两名队友发言。单边计时,每方各 4 分钟,由正方开始发言。' },
+
+  { group: '总结陈述', name: '反方五辩 · 总结陈述', duration: 180, side: 'con', type: 'single',
+    meta: '可先对整个对辩环节进行总结说明,并陈述和申论本方论点,进行升华。时间 3 分钟。' },
+  { group: '总结陈述', name: '正方五辩 · 总结陈述', duration: 180, side: 'pro', type: 'single',
+    meta: '可先对整个对辩环节进行总结说明,并陈述和申论本方论点,进行升华。时间 3 分钟。' },
+
+  { group: '赛后', name: '评委点评 & 最佳辩手', side: 'neutral', type: 'single', noTimer: true,
+    meta: '评委代表发言:点评双方表现(论点完整性、攻防逻辑性、团队协作、个人表达),指出优缺点。各团队自行内评最佳辩手。' },
+];
+
+let stageIdx = 0;
+let running = false;
+let tickId = null;
+let elapsed = 0;
+let proElapsed = 0;
+let conElapsed = 0;
+let activeSide = 'pro';
+let onCover = true;
+let protectRemaining = 0;  // seconds left in 5s no-interrupt window
+let isAnswering = false;   // true while answerer holds the floor; main timer frozen
+let turnLog = [];                    // dual stages: seconds used per completed turn
+let turnMark = { pro: 0, con: 0 };   // elapsed value when the current turn began
+let matchRecord = [];                // per-stage usage snapshots for the post-match report
+
+const $sidebar = document.getElementById('sidebar');
+const $stageName = document.getElementById('stageName');
+const $stageMeta = document.getElementById('stageMeta');
+const $timers = document.getElementById('timers');
+const $status = document.getElementById('statusRow');
+const $playBtn = document.getElementById('playBtn');
+const $switchBtn = document.getElementById('switchBtn');
+const $proBar = document.getElementById('proBar');
+const $conBar = document.getElementById('conBar');
+const $cover = document.getElementById('cover');
+const $flash = document.getElementById('flashOverlay');
+const $coverFlash = document.getElementById('coverFlash');
+const $root = document.documentElement;
+
+function fmt(sec) {
+  const v = Math.max(0, sec);
+  const m = Math.floor(v / 60);
+  const s = v % 60;
+  return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+// remaining-time display: negative = overtime, shown as +MM:SS
+function fmtRem(rem) {
+  return rem < 0 ? '+' + fmt(-rem) : fmt(rem);
+}
+
+/* ============ Color temperature engine ============ */
+function lerp(a, b, t) { return a + (b - a) * t; }
+function lerpHue(a, b, t) {
+  // shortest path around the circle
+  let d = b - a;
+  if (d > 180) d -= 360;
+  if (d < -180) d += 360;
+  let h = a + d * t;
+  if (h < 0) h += 360;
+  if (h >= 360) h -= 360;
+  return h;
+}
+function hsl(h, s, l, a) {
+  return a == null ? `hsl(${h.toFixed(1)} ${s.toFixed(1)}% ${l.toFixed(1)}%)`
+                   : `hsla(${h.toFixed(1)} ${s.toFixed(1)}% ${l.toFixed(1)}% / ${a})`;
+}
+
+// heat curve: stays low for first 70%, ramps fast in last 30%
+function heatFor(remaining, duration) {
+  if (duration <= 0) return 0;
+  if (remaining <= 0) return 1;
+  const r = remaining / duration;
+  if (r >= 0.7) {
+    // 0..0.3 in the calm zone
+    return 0.05 + (1 - r) / 0.3 * 0.25;
+  }
+  // last 70% of duration consumed: 0.3 → 1
+  const t = (0.7 - r) / 0.7;
+  return Math.min(1, 0.3 + Math.pow(t, 1.4) * 0.7);
+}
+
+function updateColorsFor(side, heat) {
+  // pro: cold(0,55,55) → hot(8,80,58) → crit(355,92,62)
+  // con: cold(212,52,55) → hot(205,78,58) → crit(195,92,60)
+  let h, s, l;
+  if (side === 'pro') {
+    if (heat < 0.5) {
+      const t = heat / 0.5;
+      h = lerpHue(0, 8, t); s = lerp(55, 80, t); l = lerp(55, 58, t);
+    } else {
+      const t = (heat - 0.5) / 0.5;
+      h = lerpHue(8, 355, t); s = lerp(80, 95, t); l = lerp(58, 62, t);
+    }
+    $root.style.setProperty('--pro', hsl(h, s, l));
+    $root.style.setProperty('--pro-soft', hsl(h, s, l, 0.55));
+    ember.setColor('pro', h, s, l);
+  } else if (side === 'con') {
+    if (heat < 0.5) {
+      const t = heat / 0.5;
+      h = lerpHue(212, 205, t); s = lerp(52, 78, t); l = lerp(55, 58, t);
+    } else {
+      const t = (heat - 0.5) / 0.5;
+      h = lerpHue(205, 195, t); s = lerp(78, 95, t); l = lerp(58, 62, t);
+    }
+    $root.style.setProperty('--con', hsl(h, s, l));
+    $root.style.setProperty('--con-soft', hsl(h, s, l, 0.55));
+    ember.setColor('con', h, s, l);
+  }
+}
+
+function updateHeatAndAtmosphere() {
+  const s = STAGES[stageIdx];
+  let proHeat = 0, conHeat = 0;
+  if (!s.noTimer) {
+    if (s.type === 'dual') {
+      proHeat = heatFor(s.duration - proElapsed, s.duration);
+      conHeat = heatFor(s.duration - conElapsed, s.duration);
+    } else if (s.side === 'pro') {
+      proHeat = heatFor(s.duration - elapsed, s.duration);
+    } else if (s.side === 'con') {
+      conHeat = heatFor(s.duration - elapsed, s.duration);
+    }
+  }
+  $root.style.setProperty('--heat-pro', proHeat.toFixed(3));
+  $root.style.setProperty('--heat-con', conHeat.toFixed(3));
+  updateColorsFor('pro', proHeat);
+  updateColorsFor('con', conHeat);
+
+  // pulse speed driven by the active side's heat
+  const turnSide = s.type === 'dual' ? activeSide : s.side;
+  const activeHeat = turnSide === 'pro' ? proHeat : turnSide === 'con' ? conHeat : 0;
+  const speed = lerp(1.8, 0.45, activeHeat);
+  $root.style.setProperty('--pulse-speed', speed.toFixed(2) + 's');
+
+  // digits catch fire when the clock runs hot
+  document.querySelectorAll('.timer-block.active').forEach(el =>
+    el.classList.toggle('burning', running && activeHeat > 0.65));
+
+  // tilt for dual mode: + means pro has more remaining (pro 占优)
+  if (s.type === 'dual') {
+    const proR = s.duration - proElapsed;
+    const conR = s.duration - conElapsed;
+    const tilt = Math.max(-1, Math.min(1, (proR - conR) / s.duration));
+    $root.style.setProperty('--tilt', tilt.toFixed(3));
+    ember.setBalance(tilt);
+    // critical state for power-bar: side with < 20% remaining pulses red-hot
+    const $bar = document.getElementById('powerBar');
+    if ($bar) {
+      $bar.classList.toggle('crit-pro', proR > 0 && proR / s.duration < 0.2);
+      $bar.classList.toggle('crit-con', conR > 0 && conR / s.duration < 0.2);
+    }
+  } else {
+    $root.style.setProperty('--tilt', '0');
+    const $bar = document.getElementById('powerBar');
+    if ($bar) $bar.classList.remove('crit-pro', 'crit-con');
+  }
+
+  // overtime
+  const remActive = s.type === 'dual'
+    ? (activeSide === 'pro' ? s.duration - proElapsed : s.duration - conElapsed)
+    : s.duration - elapsed;
+  document.body.classList.toggle('overtime', !s.noTimer && remActive < 0);
+
+  // tell ember about state
+  ember.setMode(turnSide, activeHeat, running, s.type === 'dual');
+}
+
+/* ============ Ember particle layer (sprite-based, no shadowBlur) ============ */
+const REDUCED_MOTION = window.matchMedia
+  && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const ember = (() => {
+  const canvas = document.getElementById('embers');
+  const ctx = canvas.getContext('2d');
+  // Cap DPR — retina draws 4× pixels which is the second-biggest hit
+  let W = 0, H = 0, dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  let particles = [];
+  let side = null, heat = 0, isRunning = false, balance = 0;
+
+  // Cached colors pushed by updateColorsFor — never read getComputedStyle in the loop
+  let proHSL = { h: 0,   s: 55, l: 55 };
+  let conHSL = { h: 212, s: 52, l: 55 };
+  const SPRITE_SIZE = 64;
+  const sprites = { pro: null, con: null, proFlare: null, conFlare: null };
+
+  function makeSprite(hslObj, flare) {
+    const c = document.createElement('canvas');
+    c.width = c.height = SPRITE_SIZE;
+    const cx = c.getContext('2d');
+    const C = SPRITE_SIZE / 2;
+    const hotCol   = `hsl(${hslObj.h} ${Math.min(hslObj.s + 15, 100)}% ${Math.min(hslObj.l + 24, 90)}%)`;
+    const baseCol  = `hsl(${hslObj.h} ${hslObj.s}% ${hslObj.l}%)`;
+    const fadeCol  = `hsl(${hslObj.h} ${hslObj.s}% ${hslObj.l}% / 0)`;
+    const g = cx.createRadialGradient(C, C, 0, C, C, C);
+    if (flare) {
+      /* spark — white-hot pinpoint that flies above the flames */
+      g.addColorStop(0,    '#ffffff');
+      g.addColorStop(0.22, hotCol);
+      g.addColorStop(0.55, baseCol);
+      g.addColorStop(1,    fadeCol);
+    } else {
+      /* flame tongue — hot core, colored body; overlap + additive blend
+         builds the white-hot base naturally */
+      g.addColorStop(0,    hotCol);
+      g.addColorStop(0.35, baseCol);
+      g.addColorStop(1,    fadeCol);
+    }
+    cx.fillStyle = g;
+    cx.fillRect(0, 0, SPRITE_SIZE, SPRITE_SIZE);
+    return c;
+  }
+
+  function rebuildSprites(which /* 'pro' | 'con' | undefined */) {
+    if (!which || which === 'pro') {
+      sprites.pro      = makeSprite(proHSL, false);
+      sprites.proFlare = makeSprite(proHSL, true);
+    }
+    if (!which || which === 'con') {
+      sprites.con      = makeSprite(conHSL, false);
+      sprites.conFlare = makeSprite(conHSL, true);
+    }
+  }
+
+  function resize() {
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+  rebuildSprites();
+
+  let isDual = false;   // dual stage → the waiting side keeps smoldering
+
+  // one flame/spark particle rising from the bottom of side `s`.
+  // intensity 1 = full fire; < 1 = faint smolder (slower, smaller, dimmer)
+  function makeParticle(s, intensity) {
+    const isPro = s === 'pro';
+    const isFlare = Math.random() < (0.10 + heat * 0.15) * intensity;
+    // density biased toward that side's outer edge
+    const spread = Math.pow(Math.random(), 1.35) * W * 0.55;
+    const speed = (isFlare
+      ? 2.2 + Math.random() * (2.6 + heat * 3.2)
+      : 1.6 + Math.random() * (1.9 + heat * 2.8)) * (0.4 + 0.6 * intensity);
+    return {
+      x: isPro ? spread : W - spread,
+      y: H + 5 + Math.random() * 35,
+      vx: (Math.random() - 0.5) * 0.8,
+      vy: -speed,
+      r: (isFlare ? 1.5 + Math.random() * 2 : 5 + Math.random() * 9) * (0.55 + 0.45 * intensity),
+      life: 0,
+      maxLife: isFlare ? 140 + Math.random() * 160 : 55 + Math.random() * 80,
+      side: s,
+      flare: isFlare,
+      dim: intensity,
+      seed: Math.random() * 100,
+    };
+  }
+
+  function spawn() {
+    if (REDUCED_MOTION) return;
+    if (!side || side === 'neutral') return;
+    const counts = { pro: 0, con: 0 };
+    for (const p of particles) counts[p.side]++;
+    // active side: full fire, density grows with heat
+    const target = Math.floor(90 + heat * 110);
+    while (counts[side] < target) { counts[side]++; particles.push(makeParticle(side, 1)); }
+    // dual stage: the waiting side keeps a bed of faint embers
+    if (isDual) {
+      const other = side === 'pro' ? 'con' : 'pro';
+      while (counts[other] < 16) { counts[other]++; particles.push(makeParticle(other, 0.3)); }
+    }
+  }
+
+  function step() {
+    requestAnimationFrame(step);
+    // Quick exits — battery saver when nothing visible
+    if (particles.length === 0 && (!isRunning || !side || side === 'neutral')) {
+      return;
+    }
+    ctx.clearRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'lighter';
+
+    if (!isRunning || !side || side === 'neutral') {
+      particles.forEach(p => { p.life += 4; });
+    } else {
+      spawn();
+    }
+
+    particles = particles.filter(p => {
+      p.life++;
+      const lifeT = p.life / p.maxLife;
+      if (lifeT >= 1) return false;
+
+      // flicker — flames sway harder as heat rises, sparks dance wilder
+      const sway = p.flare ? 0.9 : 0.45 + heat * 0.5;
+      p.x += p.vx + Math.sin((p.life + p.seed) * 0.12) * sway;
+      p.y += p.vy;
+      p.vy *= 0.998;
+      if (p.y < -60 || p.y > H + 60) return false;
+
+      const fade = 1 - lifeT;
+      // flame tongues taper off as they rise; sparks stay pinpoint
+      const shrink = p.flare ? fade : 1 - lifeT * 0.75;
+      const alpha = (p.flare ? fade * 0.9 : fade * (0.3 + heat * 0.25)) * (p.dim ?? 1);
+      const sprite = p.flare
+        ? (p.side === 'pro' ? sprites.proFlare : sprites.conFlare)
+        : (p.side === 'pro' ? sprites.pro      : sprites.con);
+      if (!sprite) return true;
+
+      const sz = p.r * (p.flare ? 8 : 7) * shrink;
+      ctx.globalAlpha = alpha;
+      // flames stretch vertically — tongue shape rather than round blob
+      ctx.drawImage(sprite, p.x - sz * 0.5, p.y - sz * 0.8, sz, sz * 1.6);
+      return true;
+    });
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  step();
+
+  // Debounce sprite rebuild — only when HSL moved enough to matter
+  function moved(a, b) {
+    return Math.abs(a.h - b.h) > 1.5 || Math.abs(a.s - b.s) > 1.5 || Math.abs(a.l - b.l) > 1.5;
+  }
+
+  return {
+    setMode(s, h, r, dual) { side = s || null; heat = h || 0; isRunning = r; isDual = !!dual; },
+    setBalance(t) { balance = t; },
+    setColor(which, h, s, l) {
+      const next = { h, s, l };
+      if (which === 'pro' && moved(proHSL, next)) { proHSL = next; rebuildSprites('pro'); }
+      else if (which === 'con' && moved(conHSL, next)) { conHSL = next; rebuildSprites('con'); }
+    },
+    clear() { particles = []; },
+    /* one-shot eruption — a wall of sparks and flame blasts upward
+       from that side's half. power scales count & speed. */
+    burst(s, power = 1) {
+      if (REDUCED_MOTION || s !== 'pro' && s !== 'con') return;
+      const isPro = s === 'pro';
+      const n = Math.floor(90 * power);
+      for (let i = 0; i < n; i++) {
+        const spread = Math.pow(Math.random(), 1.2) * W * 0.55;
+        const isFlare = Math.random() < 0.55;
+        particles.push({
+          x: isPro ? spread : W - spread,
+          y: H + Math.random() * 30,
+          vx: (Math.random() - 0.5) * 3,
+          vy: -(3.5 + Math.random() * 8 * power),
+          r: isFlare ? 1.5 + Math.random() * 2.5 : 4 + Math.random() * 7,
+          life: 0,
+          maxLife: 70 + Math.random() * 90,
+          side: s,
+          flare: isFlare,
+          seed: Math.random() * 100,
+        });
+      }
+    },
+    /* wind gust — blows every live particle toward the new side and
+       burns them out fast; used for the side-switch handover. */
+    gust(toSide) {
+      const dir = toSide === 'con' ? 1 : -1;
+      particles.forEach(p => {
+        p.vx += dir * (2.5 + Math.random() * 3.5);
+        p.maxLife = Math.min(p.maxLife, p.life + 45);
+      });
+    },
+  };
+})();
+
+/* ============ Sidebar ============ */
+function renderSidebar() {
+  const groups = {};
+  STAGES.forEach((s, i) => {
+    if (!groups[s.group]) groups[s.group] = [];
+    groups[s.group].push({ ...s, _idx: i });
+  });
+  let html = '';
+  Object.entries(groups).forEach(([g, items]) => {
+    html += `<h3>${g}</h3>`;
+    items.forEach(s => {
+      const dur = s.noTimer ? '—' : s.type === 'dual' ? `${fmt(s.duration)}×2` : fmt(s.duration);
+      const sideCls = s.type === 'dual' ? 'pro-side' : s.side === 'pro' ? 'pro-side' : s.side === 'con' ? 'con-side' : 'neutral-side';
+      html += `
+        <div class="stage-item ${s._idx === stageIdx ? 'active ' + sideCls : ''} ${s._idx < stageIdx ? 'done' : ''}"
+             data-idx="${s._idx}" onclick="uiJump(${s._idx})">
+          <span class="num">${s._idx + 1}</span>
+          <span class="name">${s.name}</span>
+          <span class="dur">${dur}</span>
+        </div>`;
+    });
+  });
+  $sidebar.innerHTML = html;
+}
+
+/* ============ Turn / atmosphere class ============ */
+function setTurn(side) {
+  document.body.classList.remove('pro-turn', 'con-turn');
+  if (side === 'pro') document.body.classList.add('pro-turn');
+  else if (side === 'con') document.body.classList.add('con-turn');
+  $proBar.classList.toggle('dim', side === 'con');
+  $conBar.classList.toggle('dim', side === 'pro');
+}
+
+/* ============ Stage rendering ============ */
+function buildStageNameMarkup(text) {
+  // each char as a span with stagger delay
+  return [...text].map((c, i) => {
+    if (c === ' ') return '<span class="ch" style="animation-delay:'+(i*30)+'ms">&nbsp;</span>';
+    return '<span class="ch" style="animation-delay:'+(i*30)+'ms">'+c+'</span>';
+  }).join('');
+}
+
+function renderStage(animate = true) {
+  const s = STAGES[stageIdx];
+
+  const $prog = document.getElementById('stageProgress');
+  if ($prog) $prog.textContent = `${String(stageIdx + 1).padStart(2, '0')} / ${STAGES.length} · ${s.group}`;
+
+  // stage-name page flip
+  if (animate) {
+    $stageName.classList.add('leaving');
+    setTimeout(() => {
+      $stageName.classList.remove('leaving');
+      $stageName.innerHTML = buildStageNameMarkup(s.name);
+      $stageMeta.textContent = s.meta;
+    }, 280);
+  } else {
+    $stageName.innerHTML = buildStageNameMarkup(s.name);
+    $stageMeta.textContent = s.meta;
+  }
+
+  // dual flag
+  document.body.classList.toggle('dual-stage', s.type === 'dual');
+
+  // turn
+  const turnSide = s.type === 'dual' ? activeSide : s.side;
+  setTurn(turnSide);
+
+  // show/hide protect button — only on stages with protect set
+  const $protectBtn = document.getElementById('protectBtn');
+  if ($protectBtn) $protectBtn.style.display = (s.protect && s.type === 'single') ? '' : 'none';
+
+  // timers
+  if (s.noTimer) {
+    $switchBtn.style.display = 'none';
+    $timers.classList.remove('dual');
+    $timers.innerHTML = `<div class="timer-block" style="opacity:0.6"><div class="label">本环节无需计时</div></div>`;
+  } else if (s.type === 'dual') {
+    $switchBtn.style.display = '';
+    $timers.classList.add('dual');
+    $timers.innerHTML = `
+      <div class="timer-block pro ${activeSide==='pro'?'active':'inactive'}" id="timerPro">
+        <div class="label">正方剩余</div>
+        <div class="time">${fmt(s.duration - proElapsed)}</div>
+      </div>
+      <div class="center-divider">
+        <div class="line"></div>
+        <div class="vs">VS</div>
+      </div>
+      <div class="timer-block con ${activeSide==='con'?'active':'inactive'}" id="timerCon">
+        <div class="label">反方剩余</div>
+        <div class="time">${fmt(s.duration - conElapsed)}</div>
+      </div>`;
+  } else {
+    $switchBtn.style.display = 'none';
+    $timers.classList.remove('dual');
+    const remaining = s.duration - elapsed;
+    const sideClass = s.side === 'pro' ? 'pro active' : s.side === 'con' ? 'con active' : '';
+    $timers.innerHTML = `
+      <div class="timer-block solo ${sideClass}" id="timerSolo">
+        <div class="label">${s.side === 'pro' ? '正方发言' : s.side === 'con' ? '反方发言' : '当前环节'}</div>
+        <div class="time">${fmtRem(remaining)}</div>
+      </div>`;
+  }
+  updateHeatAndAtmosphere();
+  updateTimerStyles();
+  renderStatus();
+  renderTurnLog();
+  renderSidebar();
+  updateTimeAdjustLabel();
+}
+
+function renderTurnLog() {
+  const $log = document.getElementById('turnLog');
+  if (!$log) return;
+  const s = STAGES[stageIdx];
+  if (s.type !== 'dual' || turnLog.length === 0) { $log.innerHTML = ''; return; }
+  $log.innerHTML = turnLog.map((t, i) =>
+    `<span class="chip ${t.side}"><span class="n">${i + 1}</span>${t.side === 'pro' ? '正' : '反'} ${fmt(t.secs)}</span>`
+  ).join('');
+}
+
+function updateTimerStyles() {
+  const s = STAGES[stageIdx];
+  if (s.noTimer) return;
+  if (s.type === 'dual') {
+    const proRem = s.duration - proElapsed;
+    const conRem = s.duration - conElapsed;
+    const proEl = document.getElementById('timerPro');
+    const conEl = document.getElementById('timerCon');
+    if (proEl) proEl.querySelector('.time').textContent = fmt(proRem);
+    if (conEl) conEl.querySelector('.time').textContent = fmt(conRem);
+  } else {
+    const el = document.getElementById('timerSolo');
+    const rem = s.duration - elapsed;
+    if (el) {
+      el.classList.toggle('protect', !!s.protect && isAnswering);
+      el.querySelector('.time').textContent = fmtRem(rem);
+    }
+  }
+}
+
+function adjustTime(delta) {
+  // delta > 0 = subtract remaining (扣时间), delta < 0 = add remaining (送时间)
+  const s = STAGES[stageIdx];
+  if (s.noTimer) return;
+  if (s.type === 'dual') {
+    if (activeSide === 'pro') proElapsed = Math.max(0, proElapsed + delta);
+    else conElapsed = Math.max(0, conElapsed + delta);
+  } else {
+    elapsed = Math.max(0, elapsed + delta);
+  }
+  triggerTickBounce();
+  updateTimerStyles();
+  renderStatus();
+  updateHeatAndAtmosphere();
+  saveMatchState();
+}
+
+function updateTimeAdjustLabel() {
+  const $ta = document.getElementById('timeAdjust');
+  const $lbl = document.getElementById('taLabel');
+  if (!$ta) return;
+  const s = STAGES[stageIdx];
+  if (s.noTimer) { $ta.classList.add('hidden'); return; }
+  $ta.classList.remove('hidden');
+  if (s.type === 'dual') {
+    $lbl.textContent = activeSide === 'pro' ? '微调 · 正方' : '微调 · 反方';
+  } else if (s.side === 'pro') $lbl.textContent = '微调 · 正方';
+  else if (s.side === 'con') $lbl.textContent = '微调 · 反方';
+  else $lbl.textContent = '微调';
+}
+
+function triggerTimeUpImpact() {
+  const $sw = document.getElementById('shockwave');
+  const $veil = document.getElementById('timeUpVeil');
+  if ($sw) { $sw.classList.remove('run'); void $sw.offsetWidth; $sw.classList.add('run'); }
+  if ($veil) { $veil.classList.remove('run'); void $veil.offsetWidth; $veil.classList.add('run'); }
+  document.body.classList.remove('time-up'); void document.body.offsetWidth;
+  document.body.classList.add('time-up');
+  setTimeout(() => document.body.classList.remove('time-up'), 700);
+  // flames erupt with the gavel
+  const s = STAGES[stageIdx];
+  const t = s.type === 'dual' ? activeSide : s.side;
+  ember.burst(t, 1.6);
+}
+
+function triggerTickBounce() {
+  const els = document.querySelectorAll('.timer-block.active .time');
+  els.forEach(el => {
+    el.classList.remove('tick');
+    void el.offsetWidth;
+    el.classList.add('tick');
+  });
+}
+
+function renderStatus() {
+  const s = STAGES[stageIdx];
+  if (s.noTimer) { $status.innerHTML = ''; return; }
+  let html = '';
+  if (s.protect && s.type === 'single') {
+    const kbdQ = `<kbd style="background:rgba(255,255,255,0.08);padding:1px 6px;border-radius:4px;border:1px solid rgba(255,255,255,0.15);font-family:'SF Mono',monospace;font-size:11px">Q</kbd>`;
+    if (isAnswering && protectRemaining > 0) {
+      html += `<span class="badge protect">● 回答保护中 ${protectRemaining}s · 不可打断</span>`;
+      html += `<span style="opacity:0.55">主计时冻结 · 回答结束按 ${kbdQ}</span>`;
+    } else if (isAnswering) {
+      html += `<span class="badge protect" style="background:rgba(255,180,84,0.15);color:#FFB454;border-color:rgba(255,180,84,0.3)">● 回答中(可打断)· 主计时冻结</span>`;
+      html += `<span style="opacity:0.55">回答结束按 ${kbdQ}</span>`;
+    } else {
+      html += `<span style="opacity:0.55">质疑中 ▶ · 回答开始按 ${kbdQ} 冻结主计时</span>`;
+    }
+  }
+  if (s.type === 'dual') {
+    const sideLabel = activeSide === 'pro'
+      ? '<strong style="color:var(--pro)">正方发言中</strong>'
+      : '<strong style="color:var(--con)">反方发言中</strong>';
+    html += `${sideLabel} <span style="opacity:0.5">· 按 S 切换</span>`;
+  }
+  const rem = s.type === 'dual'
+    ? (activeSide === 'pro' ? s.duration - proElapsed : s.duration - conElapsed)
+    : s.duration - elapsed;
+  if (rem <= 10 && rem > 0) {
+    html += `<span class="badge warn">最后 ${rem}s</span>`;
+  } else if (rem < 0) {
+    html += `<span class="badge over">超时 ${fmt(-rem)}</span>`;
+  } else if (rem === 0) {
+    html += `<span class="badge over">时间到</span>`;
+  }
+  $status.innerHTML = html;
+}
+
+/* ============ Tick ============ */
+let lastCountdownAt = null;
+
+/* Wall-clock driver — setInterval alone drifts and gets throttled in
+   background tabs. We anchor to Date.now() and advance the clock by the
+   real number of whole seconds elapsed; if the tab was throttled we
+   catch up the missed seconds silently (no per-second sounds), keeping
+   only the time-up gavel. */
+let tickAnchor = null;
+function tickDriver() {
+  if (tickAnchor == null) return;
+  const now = Date.now();
+  let steps = Math.floor((now - tickAnchor) / 1000);
+  if (steps <= 0) return;
+  tickAnchor += steps * 1000;
+  while (steps > 0 && running) {
+    steps--;
+    tick(steps > 0); // silent for all catch-up steps except the last
+  }
+  saveMatchState();
+}
+
+function tick(silent = false) {
+  const s = STAGES[stageIdx];
+  if (s.noTimer) { pause(); return; }
+
+  // Answer mode freezes the main 90s clock for the entire duration
+  // of the answer. The 5s protect window only governs interruptibility;
+  // the timer stays paused even after protection expires, until the
+  // operator switches back to questioning mode (press Q again).
+  if (isAnswering && s.type === 'single') {
+    if (protectRemaining > 0) {
+      protectRemaining--;
+      if (protectRemaining === 0) {
+        document.body.classList.remove('protect-active');
+        sfx.crystal();
+      }
+    }
+    triggerTickBounce();
+    updateTimerStyles();
+    renderStatus();
+    updateHeatAndAtmosphere();
+    return;
+  }
+
+  let prevRem;
+  if (s.type === 'dual') {
+    prevRem = activeSide === 'pro' ? s.duration - proElapsed : s.duration - conElapsed;
+    // dual: freeze active side at 0 — your time is your time
+    if (prevRem > 0) {
+      if (activeSide === 'pro') proElapsed++;
+      else conElapsed++;
+    }
+  } else {
+    prevRem = s.duration - elapsed;
+    // single: keep counting past 0 — overtime shows as +MM:SS
+    elapsed++;
+  }
+
+  const rem = s.type === 'dual'
+    ? (activeSide === 'pro' ? s.duration - proElapsed : s.duration - conElapsed)
+    : s.duration - elapsed;
+
+  // 30 second warning chime
+  if (!silent && prevRem > 0 && rem === 30) sfx.thirty();
+  // countdown ticks at 3, 2, 1
+  if (!silent && prevRem > 0 && (rem === 3 || rem === 2 || rem === 1)) {
+    sfx.tick(rem);
+  }
+  // dramatic mode — final 3 seconds: shed ambient animations for headroom
+  document.body.classList.toggle('final-3', rem > 0 && rem <= 3);
+  // gavel end — only fires on the transition into 0 (kept even in catch-up)
+  if (prevRem > 0 && rem <= 0) {
+    sfx.gavel();
+    triggerTimeUpImpact();
+  }
+
+  // dual stage: end when both depleted
+  if (s.type === 'dual') {
+    const proR = s.duration - proElapsed;
+    const conR = s.duration - conElapsed;
+    if (proR <= 0 && conR <= 0) pause();
+  }
+
+  triggerTickBounce();
+  updateTimerStyles();
+  renderStatus();
+  updateHeatAndAtmosphere();
+}
+
+/* ============ Audio ============ */
+let audioCtx = null;
+let masterGain = null;
+let sfxVolume = 1;     // 0..1, from settings
+let sfxMuted = false;
+function ensureAudio() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = sfxMuted ? 0 : sfxVolume;
+    masterGain.connect(audioCtx.destination);
+  }
+  return audioCtx;
+}
+function applyMasterVolume() {
+  if (masterGain) masterGain.gain.value = sfxMuted ? 0 : sfxVolume;
+  const $btn = document.getElementById('muteBtn');
+  if ($btn) $btn.innerHTML = (sfxMuted ? '🔇 已静音' : '🔊 音效') + ' <kbd>M</kbd>';
+}
+function toggleMute() {
+  sfxMuted = !sfxMuted;
+  applyMasterVolume();
+  try {
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
+    saved.muted = sfxMuted;
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(saved));
+  } catch(e) {}
+  showToast(sfxMuted ? '音效已静音' : '音效已开启');
+}
+function tone({freq=880, dur=0.2, type='sine', vol=0.25, attack=0.01, release=0.18, when=0}) {
+  try {
+    const ac = ensureAudio();
+    const o = ac.createOscillator();
+    const g = ac.createGain();
+    o.type = type;
+    o.frequency.value = freq;
+    o.connect(g); g.connect(masterGain);
+    const t0 = ac.currentTime + when;
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(vol, t0 + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.start(t0);
+    o.stop(t0 + dur + 0.05);
+  } catch(e){}
+}
+const sfx = {
+  tick(n) {
+    const freqs = { 3: 440, 2: 523, 1: 659 };
+    tone({ freq: freqs[n] || 440, dur: 0.14, type: 'triangle', vol: 0.16 });
+  },
+  gavel() {
+    // law hammer: low → mid → high stacked
+    tone({ freq: 220, dur: 0.32, type: 'sine', vol: 0.3 });
+    tone({ freq: 440, dur: 0.28, type: 'sine', vol: 0.22, when: 0.06 });
+    tone({ freq: 880, dur: 0.24, type: 'sine', vol: 0.18, when: 0.12 });
+  },
+  crystal() {
+    // shield-end shimmer
+    tone({ freq: 1568, dur: 0.6, type: 'sine', vol: 0.14, release: 0.5 });
+    tone({ freq: 2349, dur: 0.5, type: 'sine', vol: 0.1, when: 0.04 });
+  },
+  thump() {
+    tone({ freq: 120, dur: 0.18, type: 'sine', vol: 0.35 });
+    tone({ freq: 60, dur: 0.22, type: 'sine', vol: 0.2 });
+  },
+  collide() {
+    // Sword clash — four-layer synth:
+    //   1) high-passed noise burst  → the bright metal "TING" strike
+    //   2) inharmonic ring partials → the lingering metallic shimmer
+    //   3) low body thump           → weight of the two blades meeting
+    //   4) short upward scrape      → blades sliding past each other
+    try {
+      const ac = ensureAudio();
+      const now = ac.currentTime;
+      const dest = masterGain;
+
+      // ---- 1. Strike: short band-passed white-noise burst ----
+      const buf = ac.createBuffer(1, Math.floor(ac.sampleRate * 0.22), ac.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1);
+      const noise = ac.createBufferSource();
+      noise.buffer = buf;
+      const hp = ac.createBiquadFilter();
+      hp.type = 'highpass'; hp.frequency.value = 2200; hp.Q.value = 0.8;
+      const bp = ac.createBiquadFilter();
+      bp.type = 'bandpass'; bp.frequency.value = 3800; bp.Q.value = 3.5;
+      const ng = ac.createGain();
+      ng.gain.setValueAtTime(0.0001, now);
+      ng.gain.exponentialRampToValueAtTime(0.45, now + 0.004);
+      ng.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+      noise.connect(hp); hp.connect(bp); bp.connect(ng); ng.connect(dest);
+      noise.start(now);
+      noise.stop(now + 0.24);
+
+      // ---- 2. Inharmonic ring partials (the metallic afterglow) ----
+      const partials = [
+        { f: 1320, v: 0.18, d: 0.65 },
+        { f: 1870, v: 0.14, d: 0.55 },
+        { f: 2640, v: 0.10, d: 0.45 },
+        { f: 3760, v: 0.07, d: 0.35 },
+        { f: 5280, v: 0.05, d: 0.25 },
+      ];
+      partials.forEach(p => {
+        const o = ac.createOscillator();
+        const g = ac.createGain();
+        o.type = 'sine';
+        o.frequency.value = p.f;
+        g.gain.setValueAtTime(0.0001, now);
+        g.gain.exponentialRampToValueAtTime(p.v, now + 0.006);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + p.d);
+        o.connect(g); g.connect(dest);
+        o.start(now);
+        o.stop(now + p.d + 0.05);
+      });
+
+      // ---- 3. Low body thump (chesty weight of the collision) ----
+      const lo = ac.createOscillator();
+      const lg = ac.createGain();
+      lo.type = 'sine';
+      lo.frequency.setValueAtTime(170, now);
+      lo.frequency.exponentialRampToValueAtTime(55, now + 0.2);
+      lg.gain.setValueAtTime(0.0001, now);
+      lg.gain.exponentialRampToValueAtTime(0.32, now + 0.008);
+      lg.gain.exponentialRampToValueAtTime(0.0001, now + 0.26);
+      lo.connect(lg); lg.connect(dest);
+      lo.start(now);
+      lo.stop(now + 0.28);
+
+      // ---- 4. Blade scrape (subtle saw sweep right after impact) ----
+      const sc = ac.createOscillator();
+      const sg = ac.createGain();
+      const lp = ac.createBiquadFilter();
+      sc.type = 'sawtooth';
+      sc.frequency.setValueAtTime(700, now + 0.045);
+      sc.frequency.exponentialRampToValueAtTime(1800, now + 0.2);
+      lp.type = 'lowpass'; lp.frequency.value = 4500; lp.Q.value = 0.8;
+      sg.gain.setValueAtTime(0.0001, now + 0.045);
+      sg.gain.exponentialRampToValueAtTime(0.05, now + 0.075);
+      sg.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+      sc.connect(lp); lp.connect(sg); sg.connect(dest);
+      sc.start(now + 0.045);
+      sc.stop(now + 0.24);
+    } catch(e) {}
+  },
+  shieldHum() {
+    // a brief sustained 60Hz buzz at start of protect
+    tone({ freq: 60, dur: 0.5, type: 'sawtooth', vol: 0.08, release: 0.4 });
+  },
+  thirty() {
+    // 30s warning: two-note dingdong (C5 + G5)
+    tone({ freq: 523, dur: 0.4, type: 'sine', vol: 0.22, release: 0.35 });
+    tone({ freq: 784, dur: 0.42, type: 'sine', vol: 0.2, release: 0.38, when: 0.08 });
+  },
+};
+
+/* ============ Wake lock — keep the screen on while the clock runs ============ */
+let wakeLock = null;
+async function acquireWakeLock() {
+  try {
+    if ('wakeLock' in navigator && !wakeLock) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    }
+  } catch(e) {}
+}
+function releaseWakeLock() {
+  if (wakeLock) { try { wakeLock.release(); } catch(e) {} wakeLock = null; }
+}
+// the OS releases the lock when the tab hides — re-acquire on return
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && running) acquireWakeLock();
+});
+
+/* accidental close/refresh guard while the clock runs */
+window.addEventListener('beforeunload', (e) => {
+  if (running) { e.preventDefault(); e.returnValue = ''; }
+});
+
+/* ============ 3-2-1 entrance countdown ============
+   Fires when a stage starts from zero: big center digits with ticks,
+   gavel on zero, then the clock begins. Space or any stage change cancels. */
+let countdownActive = false;
+let countdownTimer = null;
+function runCountdown(done) {
+  const $c = document.getElementById('countdown');
+  const $n = document.getElementById('countdownNum');
+  if (!$c || !$n) { done(); return; }
+  countdownActive = true;
+  $c.classList.add('show');
+  let n = 3;
+  const step = () => {
+    if (!countdownActive) return;
+    if (n === 0) {
+      cancelCountdown();
+      sfx.gavel();
+      done();
+      return;
+    }
+    $n.textContent = n;
+    $n.style.animation = 'none'; void $n.offsetWidth; $n.style.animation = '';
+    sfx.tick(n);
+    n--;
+    countdownTimer = setTimeout(step, 950);
+  };
+  step();
+}
+function cancelCountdown() {
+  countdownActive = false;
+  clearTimeout(countdownTimer);
+  const $c = document.getElementById('countdown');
+  if ($c) $c.classList.remove('show');
+}
+
+/* ============ Controls ============ */
+function play() {
+  if (running) return;
+  const s = STAGES[stageIdx];
+  if (s.noTimer) return;
+  // fresh stage → run the 3-2-1 entrance first
+  const fresh = s.type === 'dual' ? (proElapsed === 0 && conElapsed === 0) : elapsed === 0;
+  if (fresh && !countdownActive) { runCountdown(beginRun); return; }
+  beginRun();
+}
+function beginRun() {
+  if (running) return;
+  running = true;
+  document.body.classList.add('running');
+  tickAnchor = Date.now();
+  tickId = setInterval(tickDriver, 200);
+  $playBtn.innerHTML = '❚❚ 暂停 <kbd>Space</kbd>';
+  // NOTE: Space only starts the questioner's clock. Protect (5s freeze)
+  // is triggered manually each time the answerer begins responding — press Q.
+  acquireWakeLock();
+  updateHeatAndAtmosphere();
+  saveMatchState();
+}
+
+/* Q toggles answer mode. Entering answer mode freezes the main 90s
+   timer and arms a fresh 5s no-interrupt protection window. Leaving
+   answer mode resumes the main timer (and cancels any leftover
+   protect time — the answerer is done). */
+function triggerProtect() {
+  const s = STAGES[stageIdx];
+  if (!s.protect || s.type !== 'single') return;
+
+  if (isAnswering) {
+    // exiting answer mode → questioner takes the floor again
+    isAnswering = false;
+    protectRemaining = 0;
+    document.body.classList.remove('protect-active');
+  } else {
+    // entering answer mode → freeze main, fire ? impact, start 5s protect
+    isAnswering = true;
+    protectRemaining = s.protect;
+    document.body.classList.remove('protect-active');
+    void document.body.offsetWidth;
+    document.body.classList.add('protect-active');
+    sfx.shieldHum();
+  }
+  updateProtectBtnLabel();
+  renderStatus();
+  updateTimerStyles();
+  updateHeatAndAtmosphere();
+}
+
+function updateProtectBtnLabel() {
+  const $btn = document.getElementById('protectBtn');
+  if (!$btn) return;
+  $btn.innerHTML = isAnswering
+    ? '回答结束 <kbd>Q</kbd>'
+    : '回答开始 <kbd>Q</kbd>';
+  $btn.classList.toggle('primary', isAnswering);
+}
+function pause() {
+  running = false;
+  document.body.classList.remove('running', 'final-3');
+  clearInterval(tickId);
+  tickAnchor = null;
+  $playBtn.innerHTML = '▶ 继续 <kbd>Space</kbd>';
+  releaseWakeLock();
+  updateHeatAndAtmosphere();
+  saveMatchState();
+}
+function toggleTimer() {
+  if (onCover) { startMatch(); return; }
+  if (countdownActive) { cancelCountdown(); showToast('已取消入场倒计时'); return; }
+  running ? pause() : play();
+}
+function resetTimer() {
+  cancelCountdown();
+  pause();
+  elapsed = 0; proElapsed = 0; conElapsed = 0;
+  protectRemaining = 0;
+  isAnswering = false;
+  turnLog = [];
+  turnMark = { pro: 0, con: 0 };
+  const s = STAGES[stageIdx];
+  activeSide = s.startSide || (s.side === 'con' ? 'con' : 'pro');
+  $playBtn.innerHTML = '▶ 开始 <kbd>Space</kbd>';
+  document.body.classList.remove('protect-active', 'overtime', 'final-3', 'time-up', 'colliding');
+  renderStage();
+  updateProtectBtnLabel();
+}
+let switchLock = false;
+function switchSide() {
+  if (STAGES[stageIdx].type !== 'dual') return;
+  // debounce — a double-tapped S during the collision animation double-fires
+  if (switchLock) return;
+  switchLock = true;
+  setTimeout(() => { switchLock = false; }, 400);
+  // log the turn that just ended (seconds the outgoing side spoke)
+  const outgoing = activeSide;
+  const used = outgoing === 'pro' ? proElapsed - turnMark.pro : conElapsed - turnMark.con;
+  if (used > 0) turnLog.push({ side: outgoing, secs: used });
+  // collision: slabs + seam + burst
+  const $col = document.getElementById('collision');
+  if ($col) { $col.classList.remove('run'); void $col.offsetWidth; $col.classList.add('run'); }
+  document.body.classList.remove('colliding'); void document.body.offsetWidth;
+  document.body.classList.add('colliding');
+  setTimeout(() => {
+    document.body.classList.remove('colliding');
+    if ($col) $col.classList.remove('run');
+  }, 800);
+  // residual radial flash
+  $flash.classList.remove('run'); void $flash.offsetWidth; $flash.classList.add('run');
+  // power-bar tearing slash
+  const $tear = document.getElementById('powerBarTear');
+  if ($tear) { $tear.classList.remove('run'); void $tear.offsetWidth; $tear.classList.add('run'); }
+  sfx.collide();
+  activeSide = activeSide === 'pro' ? 'con' : 'pro';
+  turnMark[activeSide] = activeSide === 'pro' ? proElapsed : conElapsed;
+  // flames hand over: old side's fire gets blown across, new side flares up
+  ember.gust(activeSide);
+  ember.burst(activeSide, 0.7);
+  renderStage();
+  saveMatchState();
+}
+function nextStage() {
+  if (stageIdx < STAGES.length - 1) { recordStage(); pause(); stageIdx++; resetTimer(); }
+}
+function prevStage() {
+  if (stageIdx > 0) { recordStage(); pause(); stageIdx--; resetTimer(); }
+}
+function jumpTo(i) { recordStage(); pause(); stageIdx = i; resetTimer(); }
+
+/* ============ Match report ============
+   Snapshot each stage's real usage when leaving it (re-visits replace the
+   old entry), build a plain-text report on demand. */
+function stageSnapshot() {
+  const s = STAGES[stageIdx];
+  if (s.noTimer) return null;
+  if (s.type === 'dual') {
+    if (proElapsed === 0 && conElapsed === 0) return null;
+    return { idx: stageIdx, type: 'dual', proUsed: proElapsed, conUsed: conElapsed,
+             duration: s.duration, turns: turnLog.slice() };
+  }
+  if (elapsed === 0) return null;
+  return { idx: stageIdx, type: 'single', side: s.side, used: elapsed, duration: s.duration };
+}
+function recordStage() {
+  const snap = stageSnapshot();
+  if (!snap) return;
+  matchRecord = matchRecord.filter(r => r.idx !== snap.idx);
+  matchRecord.push(snap);
+}
+
+function buildReportText() {
+  // current stage live data included without waiting for a switch
+  const entries = matchRecord.filter(r => r.idx !== stageIdx);
+  const live = stageSnapshot();
+  if (live) entries.push(live);
+  entries.sort((a, b) => a.idx - b.idx);
+
+  const g = id => document.getElementById(id)?.textContent || '';
+  const lines = [];
+  lines.push(g('matchTitle'));
+  lines.push(`辩题：${g('matchTopic')}`);
+  lines.push(`正方：${g('proName')} ｜ 反方：${g('conName')}`);
+  lines.push(`生成时间：${new Date().toLocaleString('zh-CN')}`);
+  lines.push('');
+  lines.push('── 各环节用时 ' + '─'.repeat(24));
+  if (!entries.length) lines.push('（尚无计时记录）');
+  entries.forEach(r => {
+    const s = STAGES[r.idx];
+    lines.push('');
+    lines.push(`${String(r.idx + 1).padStart(2, '0')}  ${s.name}`);
+    if (r.type === 'dual') {
+      lines.push(`    正方 ${fmt(r.proUsed)} / ${fmt(r.duration)} ｜ 反方 ${fmt(r.conUsed)} / ${fmt(r.duration)}`);
+      if (r.turns && r.turns.length) {
+        lines.push(`    发言记录：` + r.turns.map((t, i) =>
+          `${i + 1} ${t.side === 'pro' ? '正' : '反'} ${fmt(t.secs)}`).join(' → '));
+      }
+    } else {
+      const over = r.used - r.duration;
+      const sideName = r.side === 'pro' ? '正方' : r.side === 'con' ? '反方' : '';
+      lines.push(`    ${sideName} 用时 ${fmt(Math.min(r.used, r.duration))} / ${fmt(r.duration)}` +
+                 (over > 0 ? `（超时 ${fmt(over)}）` : ''));
+    }
+  });
+  return lines.join('\n');
+}
+
+function openReport() {
+  document.getElementById('reportText').textContent = buildReportText();
+  document.getElementById('reportModal').classList.add('show');
+}
+function closeReport() {
+  document.getElementById('reportModal').classList.remove('show');
+}
+async function copyReport() {
+  const text = document.getElementById('reportText').textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('报告已复制到剪贴板');
+  } catch(e) {
+    // clipboard API can be blocked outside secure contexts — fall back
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    showToast('报告已复制到剪贴板');
+  }
+}
+function downloadReport() {
+  const blob = new Blob([document.getElementById('reportText').textContent], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '辩论赛报告.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/* ============ Toast ============ */
+let toastTimer = null;
+function showToast(msg, ms = 2200) {
+  const $t = document.getElementById('toast');
+  if (!$t) return;
+  $t.textContent = msg;
+  $t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $t.classList.remove('show'), ms);
+}
+
+/* ============ Mis-operation guard + undo ============
+   While the clock is RUNNING, stage switches and reset require the same
+   action twice within 2.5s (armed via toast). Every destructive action
+   first snapshots the current state; Z restores it. */
+let confirmArm = { action: null, at: 0 };
+let undoSnap = null;
+
+function guarded(action, label, fn) {
+  if (!running) { fn(); return; }
+  const now = Date.now();
+  if (confirmArm.action === action && now - confirmArm.at < 2500) {
+    confirmArm = { action: null, at: 0 };
+    fn();
+  } else {
+    confirmArm = { action, at: now };
+    showToast(`计时进行中 · 再按一次${label}确认`);
+  }
+}
+
+function takeSnapshot() {
+  if (elapsed > 0 || proElapsed > 0 || conElapsed > 0) {
+    undoSnap = { stageIdx, elapsed, proElapsed, conElapsed, activeSide,
+                 turnLog: turnLog.slice(), turnMarkPro: turnMark.pro, turnMarkCon: turnMark.con };
+  }
+}
+
+function restoreUndo() {
+  if (!undoSnap) { showToast('没有可撤销的操作'); return; }
+  pause();
+  stageIdx = undoSnap.stageIdx;
+  elapsed = undoSnap.elapsed;
+  proElapsed = undoSnap.proElapsed;
+  conElapsed = undoSnap.conElapsed;
+  activeSide = undoSnap.activeSide;
+  turnLog = undoSnap.turnLog || [];
+  turnMark = { pro: undoSnap.turnMarkPro || 0, con: undoSnap.turnMarkCon || 0 };
+  undoSnap = null;
+  renderStage(false);
+  updateProtectBtnLabel();
+  saveMatchState();
+  showToast(`已撤销 · 回到「${STAGES[stageIdx].name}」`);
+}
+
+/* guarded UI entry points — buttons/keys call these, never the raw fns */
+function uiNext()   { guarded('next',  '「下一个」', () => { takeSnapshot(); nextStage(); }); }
+function uiPrev()   { guarded('prev',  '「上一个」', () => { takeSnapshot(); prevStage(); }); }
+function uiReset()  { guarded('reset', '「重置」',   () => { takeSnapshot(); resetTimer(); }); }
+function uiJump(i)  { guarded('jump' + i, '该环节', () => { takeSnapshot(); jumpTo(i); }); }
+
+/* ============ Match-state persistence ============
+   The clock state survives a refresh/crash; on load, the cover offers
+   to resume. Cleared when returning to cover or discarding. */
+const MATCH_KEY = 'debateTimerMatchState';
+
+function saveMatchState() {
+  if (onCover) return;
+  try {
+    localStorage.setItem(MATCH_KEY, JSON.stringify({
+      stageIdx, elapsed, proElapsed, conElapsed, activeSide,
+      turnLog, turnMarkPro: turnMark.pro, turnMarkCon: turnMark.con,
+      matchRecord,
+      savedAt: Date.now(),
+    }));
+  } catch(e) {}
+}
+function clearMatchState() {
+  try { localStorage.removeItem(MATCH_KEY); } catch(e) {}
+}
+function loadMatchState() {
+  try {
+    const st = JSON.parse(localStorage.getItem(MATCH_KEY) || 'null');
+    if (!st) return null;
+    if (Date.now() - (st.savedAt || 0) > 12 * 3600 * 1000) return null; // stale
+    if (!(st.stageIdx > 0 || st.elapsed > 0 || st.proElapsed > 0 || st.conElapsed > 0)) return null;
+    if (st.stageIdx >= STAGES.length) return null;
+    return st;
+  } catch(e) { return null; }
+}
+function offerResume() {
+  const st = loadMatchState();
+  const $b = document.getElementById('resumeBanner');
+  if (!st || !$b) return;
+  document.getElementById('resumeText').textContent =
+    `检测到未完成的比赛 · 「${STAGES[st.stageIdx].name}」`;
+  $b.classList.add('show');
+}
+function resumeMatch() {
+  const st = loadMatchState();
+  const $b = document.getElementById('resumeBanner');
+  if ($b) $b.classList.remove('show');
+  if (!st) return;
+  stageIdx = st.stageIdx;
+  elapsed = st.elapsed; proElapsed = st.proElapsed; conElapsed = st.conElapsed;
+  activeSide = st.activeSide || 'pro';
+  turnLog = st.turnLog || [];
+  turnMark = { pro: st.turnMarkPro || 0, con: st.turnMarkCon || 0 };
+  matchRecord = st.matchRecord || [];
+  onCover = false;
+  $cover.classList.add('hidden');
+  renderStage(false);
+  updateProtectBtnLabel();
+  showToast('已恢复比赛进度 · 按 Space 继续计时');
+}
+function discardMatch() {
+  clearMatchState();
+  const $b = document.getElementById('resumeBanner');
+  if ($b) $b.classList.remove('show');
+}
+
+function startMatch() {
+  // cinematic intro: cover dismantles, then arena
+  $cover.classList.add('exiting');
+  setTimeout(() => {
+    $coverFlash.classList.remove('run'); void $coverFlash.offsetWidth; $coverFlash.classList.add('run');
+    sfx.thump();
+  }, 700);
+  setTimeout(() => {
+    onCover = false;
+    $cover.classList.add('hidden');
+    document.body.classList.add('entering');
+    resetTimer();
+    setTimeout(() => document.body.classList.remove('entering'), 1000);
+  }, 1100);
+}
+
+function initCoverDust() {
+  const host = document.getElementById('coverDust');
+  if (!host) return;
+  host.innerHTML = '';
+  const N = 60;
+  for (let i = 0; i < N; i++) {
+    const x = Math.random() * 100;
+    const leftSide = x < 50;
+    const dur = 14 + Math.random() * 18;
+    const delay = -Math.random() * dur;
+    const dx = (Math.random() - 0.5) * 200;
+    const size = 1 + Math.random() * 2.5;
+    const el = document.createElement('i');
+    el.style.left = x + 'vw';
+    el.style.bottom = (-Math.random() * 20) + 'vh';
+    el.style.width = el.style.height = size + 'px';
+    el.style.background = leftSide
+      ? `rgba(217,77,77,${0.3 + Math.random() * 0.4})`
+      : `rgba(74,139,212,${0.3 + Math.random() * 0.4})`;
+    el.style.boxShadow = `0 0 ${4 + Math.random() * 6}px currentColor`;
+    el.style.color = leftSide ? 'rgba(217,77,77,0.8)' : 'rgba(74,139,212,0.8)';
+    el.style.setProperty('--dx', dx + 'px');
+    el.style.animationDuration = dur + 's';
+    el.style.animationDelay = delay + 's';
+    host.appendChild(el);
+  }
+}
+
+function initCoverTitle() {
+  const $h = document.getElementById('coverTitle');
+  if (!$h) return;
+  const text = $h.textContent;
+  $h.innerHTML = [...text].map((c, i) => {
+    const ch = c === ' ' ? '&nbsp;' : c;
+    return `<span class="ch" style="animation-delay:${300 + i * 60}ms">${ch}</span>`;
+  }).join('');
+}
+function backToCover() {
+  pause();
+  clearMatchState();
+  onCover = true;
+  stageIdx = 0;
+  elapsed = 0; proElapsed = 0; conElapsed = 0;
+  turnLog = [];
+  turnMark = { pro: 0, con: 0 };
+  matchRecord = [];
+  document.body.classList.remove('protect-active', 'overtime', 'dual-stage');
+  $cover.classList.remove('hidden', 'exiting');
+  setTurn(null);
+  initCoverTitle();
+  renderStage(false);
+}
+function toggleSidebar() {
+  document.getElementById('sidebar').classList.toggle('open');
+}
+function toggleFullscreen() {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.code === 'Space') { e.preventDefault(); toggleTimer(); }
+  else if (e.key === 'ArrowRight') uiNext();
+  else if (e.key === 'ArrowLeft') uiPrev();
+  else if (e.key === 'r' || e.key === 'R') uiReset();
+  else if (e.key === 's' || e.key === 'S') switchSide();
+  else if (e.key === 'q' || e.key === 'Q') triggerProtect();
+  else if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+  else if (e.key === 'z' || e.key === 'Z') restoreUndo();
+  else if (e.key === 'm' || e.key === 'M') toggleMute();
+});
+
+/* ============ Settings ============ */
+const SETTINGS_KEY = 'debateTimerSettings';
+const SETTINGS_FIELDS = [
+  { key: 'title', def: '辩论赛', targets: ['matchTitle', 'coverTitle'] },
+  { key: 'topic', def: '辩题待定', cover: '「 辩题待定 」', targets: ['matchTopic'] },
+  { key: 'round', def: '第 01 场', targets: ['coverRound'] },
+  { key: 'date',  def: '日期待定', targets: ['coverDate'] },
+  { key: 'pro',   def: '队伍待定', targets: ['proName', 'coverPro'] },
+  { key: 'con',   def: '队伍待定', targets: ['conName', 'coverCon'] },
+];
+
+const DEFAULT_DURATIONS = STAGES.map(s => s.duration ?? null);
+
+function applyDurations(overrides) {
+  STAGES.forEach((s, i) => {
+    if (DEFAULT_DURATIONS[i] == null) return;
+    const ov = overrides && overrides[i];
+    s.duration = (ov > 0) ? ov : DEFAULT_DURATIONS[i];
+  });
+}
+
+function loadSettings() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'); } catch(e) {}
+  SETTINGS_FIELDS.forEach(f => {
+    const val = saved[f.key] ?? f.def;
+    applyField(f, val);
+  });
+  sfxVolume = (saved.vol ?? 100) / 100;
+  sfxMuted = !!saved.muted;
+  applyMasterVolume();
+  applyDurations(saved.durations);
+  initCoverTitle();
+}
+
+function applyField(f, val) {
+  f.targets.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    // coverTopic gets wrapped in quotes
+    if (id === 'coverTopic' || (f.key === 'topic' && id === 'coverTopic')) {
+      el.textContent = `「 ${val} 」`;
+    } else if (id === 'coverTitle') {
+      el.textContent = val;
+    } else {
+      el.textContent = val;
+    }
+  });
+  // topic also goes to coverTopic with quote wrap
+  if (f.key === 'topic') {
+    const ct = document.getElementById('coverTopic');
+    if (ct) ct.textContent = `「 ${val} 」`;
+  }
+}
+
+function openSettings() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'); } catch(e) {}
+  document.getElementById('setTitle').value = saved.title ?? '';
+  document.getElementById('setTopic').value = saved.topic ?? '';
+  document.getElementById('setRound').value = saved.round ?? '';
+  document.getElementById('setDate').value  = saved.date ?? '';
+  document.getElementById('setPro').value   = saved.pro ?? '';
+  document.getElementById('setCon').value   = saved.con ?? '';
+  // volume
+  const $vol = document.getElementById('setVol');
+  $vol.value = saved.vol ?? 100;
+  document.getElementById('setVolVal').textContent = $vol.value + '%';
+  $vol.oninput = () => { document.getElementById('setVolVal').textContent = $vol.value + '%'; };
+  // per-stage durations
+  const $list = document.getElementById('durList');
+  $list.innerHTML = STAGES.map((s, i) => {
+    if (DEFAULT_DURATIONS[i] == null) return '';
+    return `<label class="dur-row"><span>${s.name}${s.type === 'dual' ? '（每方）' : ''}</span>
+      <input type="number" min="10" max="1800" step="5" data-idx="${i}"
+             value="${s.duration}" placeholder="${DEFAULT_DURATIONS[i]}">
+      <span class="dur-def">默认 ${fmt(DEFAULT_DURATIONS[i])}</span></label>`;
+  }).join('');
+  document.getElementById('settingsModal').classList.add('show');
+}
+
+function resetDurInputs() {
+  document.querySelectorAll('#durList input').forEach(inp => {
+    inp.value = DEFAULT_DURATIONS[+inp.dataset.idx];
+  });
+}
+function closeSettings() {
+  document.getElementById('settingsModal').classList.remove('show');
+}
+function saveSettings() {
+  const data = {
+    title: document.getElementById('setTitle').value.trim(),
+    topic: document.getElementById('setTopic').value.trim(),
+    round: document.getElementById('setRound').value.trim(),
+    date:  document.getElementById('setDate').value.trim(),
+    pro:   document.getElementById('setPro').value.trim(),
+    con:   document.getElementById('setCon').value.trim(),
+  };
+  Object.keys(data).forEach(k => { if (!data[k]) delete data[k]; });
+  // volume + mute (mute is toggled live via M, keep its current value)
+  data.vol = +document.getElementById('setVol').value;
+  if (sfxMuted) data.muted = true;
+  // duration overrides — only store values that differ from defaults
+  const durations = {};
+  document.querySelectorAll('#durList input').forEach(inp => {
+    const i = +inp.dataset.idx;
+    const v = Math.round(+inp.value);
+    if (v > 0 && v !== DEFAULT_DURATIONS[i]) durations[i] = v;
+  });
+  if (Object.keys(durations).length) data.durations = durations;
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(data));
+  SETTINGS_FIELDS.forEach(f => applyField(f, data[f.key] ?? f.def));
+  sfxVolume = data.vol / 100;
+  applyMasterVolume();
+  applyDurations(durations);
+  initCoverTitle();
+  if (!onCover) renderStage(false); // refresh timer display if durations changed
+  closeSettings();
+}
+
+// Close modal on backdrop click or Esc
+document.addEventListener('click', (e) => {
+  if (e.target === document.getElementById('settingsModal')) closeSettings();
+  if (e.target === document.getElementById('reportModal')) closeReport();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { closeSettings(); closeReport(); closeAudioGuide(); }
+});
+
+/* ============ Audio guide ============ */
+function openAudioGuide() {
+  document.getElementById('audioGuide').classList.add('show');
+  ensureAudio();
+}
+function closeAudioGuide() {
+  document.getElementById('audioGuide').classList.remove('show');
+}
+function playDemo(btn, name) {
+  ensureAudio();
+  const card = btn.closest('.ag-card');
+  card.classList.remove('pulse'); void card.offsetWidth; card.classList.add('pulse');
+  if (name === 'tickSeq') {
+    sfx.tick(3);
+    setTimeout(() => sfx.tick(2), 700);
+    setTimeout(() => sfx.tick(1), 1400);
+    setTimeout(() => sfx.gavel(), 2100);
+  } else if (sfx[name]) {
+    sfx[name]();
+  }
+}
+
+renderSidebar();
+renderStage(false);
+setTurn(null);
+updateHeatAndAtmosphere();
+initCoverDust();
+loadSettings();
+offerResume();
+</script>
+</body>
+</html>
